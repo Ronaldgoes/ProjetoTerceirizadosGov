@@ -21,7 +21,11 @@ const ORGAOS = [
   { id: "sejuri", nome: "SEJURI - Secretaria de Estado de Justiça e Reintegração Social", arquivo: "sejuri.xlsx" },
   { id: "sef", nome: "SEF - Secretaria de Estado da Fazenda", arquivo: "sef.xlsx" },
   { id: "sas", nome: "SAS - Secretaria de Estado da Assistência Social", arquivo: "sas.xlsx" },
-  { id: "sie", nome: "SIE - Secretaria de Estado da Infraestrutura e Mobilidade", arquivo: "sie.xlsx" },
+  { id: "sed", nome: "SED - Secretaria de Estado de Educação", arquivo: "sed.xlsx" },
+  { id: "udesc", nome: "UDESC - Universidade do Estado de Santa Catarina", arquivo: "udesc.xlsx" },
+  { id: "scc", nome: "SCC - 	Secretaria de Estado da Casa Civil", arquivo: "scc.xlsx" },
+  { id: "gvg", nome: "GVG - 	Gabinete do Vice-Governador", arquivo: "gvg.xlsx" },
+  
  
 
 
@@ -34,8 +38,8 @@ const COL_INDEX = { ...COL, pdf: 9 };
 // Cada card direciona para /gestao/:orgaoId
 function SelecaoOrgao() {
   return (
-    <div style={{ padding: "60px 20px", textAlign: "center" }}>
-      <h1 style={{ color: "#F1F5F9", marginBottom: "40px" }}>Gestão de Contratos Terceirizados</h1>
+    <div style={{ padding: "60px 20px", textAlign: "center", backgroundColor: "#060D1A", minHeight: "100vh", margin: "-60px -20px" }}>
+      <h1 style={{ color: "#03407e", marginBottom: "40px" }}>Gestão de Contratos Terceirizados</h1>
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))", gap: "20px", maxWidth: "1000px", margin: "0 auto" }}>
         {ORGAOS.map(o => (
           <Link key={o.id} to={`/gestao/${o.id}`} style={{ textDecoration: "none" }}>
