@@ -85,8 +85,8 @@ export default function TableView({ data }) {
                             </tr>
                             {expanded === i && (
                                 <tr key={`exp-${i}`}>
-                                    <td colSpan={6} style={{ background: "#071120", padding: "15px" }}>
-                                        <div style={{ fontSize: 10, color: "#475569", marginBottom: 5 }}>FUNÇÕES / DETALHES</div>
+                                    <td colSpan={8} style={{background: "#071120", padding: "1px" }}>
+                                        <div style={{ fontSize: 10, color: "#475569", marginBottom: 5 }}>FUNÇÕES / VALOR MENSAL / POSTOS</div>
                                         <p style={{ margin: 0, whiteSpace: "pre-line", fontSize: 12 }}>{String(r.funcoes) || "Não informado"}</p>
                                     </td>
                                 </tr>
