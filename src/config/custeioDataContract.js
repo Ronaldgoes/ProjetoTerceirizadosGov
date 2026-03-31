@@ -1,0 +1,28 @@
+export const CUSTEIO_DATA_CONTRACT = {
+  requiredFields: [
+    "year",
+    "month",
+    "elementoCode",
+    "elementoName",
+    "subelementoCode",
+    "subelementoName",
+    "unidadeGestoraCode",
+    "unidadeGestoraName",
+    "vlempenhado",
+    "vlliquidado",
+    "vlpago",
+  ],
+  exampleRecord: {
+    year: 2026,
+    month: 2,
+    elementoCode: "39",
+    elementoName: "Outros Servicos Terceiros - Pessoa Juridica",
+    subelementoCode: "33903919",
+    subelementoName: "Manutencao e Conservacao de Veiculos",
+    unidadeGestoraCode: "160097",
+    unidadeGestoraName: "Departamento Estadual de Transito",
+    vlempenhado: 5428637.6,
+    vlliquidado: 3180599.05,
+    vlpago: 3170643.62,
+  },
+};

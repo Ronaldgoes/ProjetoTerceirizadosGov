@@ -1,10 +1,6 @@
 import * as XLSX from "xlsx";
 
-/*
-  Arquivo: src/utils/formatters.js
-  Descrição: funções utilitárias para formatar valores, números, datas e extrair links do Excel.
-*/
-
+// Indices padrao usados quando a planilha nao traz um cabecalho reconhecivel.
 export const COL = {
   instrumento: 0,
   funcoes: 1,
@@ -17,131 +13,98 @@ export const COL = {
   postos: 8,
 };
 
-// ==============================
-// 💰 FORMATAR VALOR EM REAL (BRL)
-// ==============================
-export const fmtBRL = (v) => {
-  if (v === undefined || v === null) return "—";
+// Formata qualquer numero como moeda brasileira.
+export function fmtBRL(value) {
+  if (value === undefined || value === null) return "--";
 
-  const n = typeof v === "number" ? v : Number(v);
-
-  if (isNaN(n)) return "—";
+  const numericValue = typeof value === "number" ? value : Number(value);
+  if (Number.isNaN(numericValue)) return "--";
 
   return new Intl.NumberFormat("pt-BR", {
     style: "currency",
     currency: "BRL",
     minimumFractionDigits: 2,
-  }).format(n);
-};
+  }).format(numericValue);
+}
 
-// ==============================
-// 🔢 FORMATAR NÚMEROS
-// ==============================
-export const fmtNum = (v) => {
-  const n = parseInt(v);
-  return isNaN(n) ? "—" : n.toLocaleString("pt-BR");
-};
+// Formata valores inteiros usados em postos ou contagens.
+export function fmtNum(value) {
+  const numericValue = parseInt(value, 10);
+  return Number.isNaN(numericValue) ? "--" : numericValue.toLocaleString("pt-BR");
+}
 
-// ==============================
-// 💰 CONVERTER VALOR DA PLANILHA
-// ==============================
-export const parseValor = (v) => {
-  if (v === undefined || v === null || v === "") return 0;
+// Converte valores monetarios vindos da planilha em numero JavaScript.
+export function parseValor(value) {
+  if (value === undefined || value === null || value === "") return 0;
+  if (typeof value === "number" && !Number.isNaN(value)) return value;
 
-  // Se já for número (Excel às vezes manda assim)
-  if (typeof v === "number" && !isNaN(v)) return v;
-
-  let s = String(v).trim().replace(/[R$\s]/g, "");
-
-  const hasComma = s.includes(",");
-  const hasDot = s.includes(".");
+  let sanitized = String(value).trim().replace(/[R$\s]/g, "");
+  const hasComma = sanitized.includes(",");
+  const hasDot = sanitized.includes(".");
 
   if (hasComma && hasDot) {
-    const lastComma = s.lastIndexOf(",");
-    const lastDot = s.lastIndexOf(".");
+    const lastComma = sanitized.lastIndexOf(",");
+    const lastDot = sanitized.lastIndexOf(".");
 
-    if (lastComma > lastDot) {
-      // 🇧🇷 formato brasileiro: 1.234.567,89
-      s = s.replace(/\./g, "").replace(/,/g, ".");
-    } else {
-      // 🇺🇸 formato inglês: 1,234,567.89
-      s = s.replace(/,/g, "");
-    }
+    sanitized = lastComma > lastDot ? sanitized.replace(/\./g, "").replace(/,/g, ".") : sanitized.replace(/,/g, "");
   } else if (hasComma) {
-    // decimal com vírgula
-    s = s.replace(/\./g, "").replace(/,/g, ".");
+    sanitized = sanitized.replace(/\./g, "").replace(/,/g, ".");
   } else {
-    // sem vírgula decimal
-    s = s.replace(/,/g, "");
+    sanitized = sanitized.replace(/,/g, "");
   }
 
-  const n = parseFloat(s);
-  return isNaN(n) ? 0 : n;
-};
+  const parsedValue = parseFloat(sanitized);
+  return Number.isNaN(parsedValue) ? 0 : parsedValue;
+}
 
-// ==============================
-// 🔢 CONVERTER POSTOS
-// ==============================
-export const parsePostos = (v) => {
-  const n = parseInt(v);
-  return isNaN(n) ? 0 : n;
-};
+// Converte a coluna de postos para inteiro simples.
+export function parsePostos(value) {
+  const numericValue = parseInt(value, 10);
+  return Number.isNaN(numericValue) ? 0 : numericValue;
+}
 
-// ==============================
-// 📅 FORMATAR DATA
-// ==============================
-export const fmtDate = (v) => {
-  if (v === undefined || v === null || v === "") return "—";
+// Formata datas vindas da planilha, inclusive quando o Excel manda serial numerico.
+export function fmtDate(value) {
+  if (value === undefined || value === null || value === "") return "--";
 
-  if (v instanceof Date) {
-    return v.toLocaleDateString("pt-BR");
+  if (value instanceof Date) {
+    return value.toLocaleDateString("pt-BR");
   }
 
-  // Excel número (serial date)
-  if (typeof v === "number") {
-    const d = XLSX.SSF.parse_date_code(v);
-    if (!d || !d.y) return String(v);
+  if (typeof value === "number") {
+    const parsedDate = XLSX.SSF.parse_date_code(value);
+    if (!parsedDate || !parsedDate.y) return String(value);
 
-    return new Date(d.y, d.m - 1, d.d).toLocaleDateString("pt-BR");
+    return new Date(parsedDate.y, parsedDate.m - 1, parsedDate.d).toLocaleDateString("pt-BR");
   }
 
-  const parsed = new Date(v);
-  if (!isNaN(parsed)) return parsed.toLocaleDateString("pt-BR");
+  const browserDate = new Date(value);
+  return Number.isNaN(browserDate.getTime()) ? String(value) : browserDate.toLocaleDateString("pt-BR");
+}
 
-  return String(v);
-};
-
-// ==============================
-// 🔗 EXTRAIR LINK DO EXCEL (COMPLETO)
-// ==============================
-export function extrairLink(ws, rowIndex, colIndex, valorCelula) {
+// Tenta encontrar um link real na celula do Excel, formula ou texto bruto.
+export function extrairLink(worksheet, rowIndex, colIndex, cellValue) {
   try {
     const cellAddress = XLSX.utils.encode_cell({ r: rowIndex, c: colIndex });
-    const cell = ws[cellAddress];
+    const cell = worksheet[cellAddress];
 
-    // ✅ 1. Hyperlink real
-    if (cell?.l?.Target) {
-      return cell.l.Target;
-    }
+    if (cell?.l?.Target) return cell.l.Target;
 
-    // ✅ 2. Fórmula HYPERLINK()
     if (cell?.f && cell.f.toLowerCase().includes("hyperlink")) {
       const match = cell.f.match(/"(https?:\/\/[^"]+)"/);
       if (match) return match[1];
     }
 
-    // ✅ 3. Valor da célula com link
     if (cell?.v && typeof cell.v === "string" && cell.v.includes("http")) {
       return cell.v;
     }
 
-    // ✅ 4. Fallback (valor direto da linha)
-    if (typeof valorCelula === "string" && valorCelula.includes("http")) {
-      return valorCelula;
+    if (typeof cellValue === "string" && cellValue.includes("http")) {
+      return cellValue;
     }
 
     return "";
-  } catch (e) {
+  } catch {
     return "";
   }
 }

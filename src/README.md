@@ -1,18 +1,21 @@
-# Estrutura de pastas do src
+# Estrutura atual do src
 
-- `App.jsx`: componente raiz do dashboard. Gerencia seleção de órgão, leitura de planilha XLSX e estado global.
-- `main.jsx`: ponto de entrada do React (renderiza `<App />`).
-- `App.css`, `index.css`: estilos base.
-- `assets/`: imagens, logos, arquivos estáticos da aplicação.
-- `pages/`:
-  - `TableView.jsx`: tabela de contratos e detalhes expandidos.
-  - `SummaryView.jsx`: cards de resumo por empresa (KPIs).
-- `styles/`:
-  - `Dashboard.css`: estilos do layout geral do dashboard.
-- `utils/`:
-  - `formatters.js`: funções de formatação (BRL, números, datas) e mapeamento de colunas.
+- `App.jsx`: entrada visual simples da aplicacao.
+- `main.jsx`: ponto de montagem do React.
+- `app/AppRouter.jsx`: concentrador de rotas.
+- `components/ContractsTable.jsx`: tabela principal de contratos e documentos.
+- `data/organs.js`: lista central dos orgaos e arquivos XLSX.
+- `pages/OrgansHomePage.jsx`: tela inicial do site.
+- `pages/ContractsDashboardPage.jsx`: dashboard por orgao, com menu lateral, busca e rotas de contratos.
+- `pages/CusteioDashboard.jsx`: painel BI com dados oficiais do portal.
+- `styles/Dashboard.css`: estilos principais do sistema.
+- `utils/formatters.js`: formatacao de valores, datas e links da planilha.
+- `utils/textHelpers.js`: normalizacao de texto e geracao de slug.
+- `utils/contractGroups.js`: agrupamento dos documentos por contrato.
+- `utils/workbookImport.js`: leitura e padronizacao das planilhas XLSX.
 
-## Observações gerais
-- A app usa React Router para navegação entre `SelecaoOrgao` (inicial) e `DashboardLayout` (por órgão).
-- Os dados são carregados de planilhas em `public/planilhas` via `fetch`.
-- Cada órgão tem um resumo local salvo em estado (`resumos` por ID do órgão).
+## Observacoes
+
+- A navegacao principal esta separada por responsabilidade, o que facilita manutencao no VS Code.
+- A regra de agrupamento dos contratos agora fica isolada em um utilitario proprio.
+- A leitura da planilha tambem foi isolada, evitando concentrar tudo em um unico componente.
