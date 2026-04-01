@@ -15,7 +15,7 @@ const COLUMN_ALIASES = {
   pdf: ["pdf"],
 };
 
-// Procura a coluna real da planilha usando o cabecalho e aliases conhecidos.
+// Procura a coluna real da planilha usando o cabeçalho e aliases conhecidos.
 function findColumnIndex(header, fieldName) {
   const normalizedName = normalizeText(fieldName);
 
@@ -34,7 +34,7 @@ function findColumnIndex(header, fieldName) {
   return COL[fieldName];
 }
 
-// Mapeia o cabecalho da planilha para os campos usados no sistema.
+// Mapeia o cabeçalho da planilha para os campos usados no sistema.
 function getColumnIndexes(header) {
   return {
     instrumento: findColumnIndex(header, "instrumento"),

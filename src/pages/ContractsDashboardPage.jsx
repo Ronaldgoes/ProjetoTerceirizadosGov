@@ -8,6 +8,7 @@ import { loadSpreadsheetRecords } from "../utils/workbookImport";
 
 // Lista os contratos de um órgão.
 function ContractListSection({ groups, orgao }) {
+  if (!orgao) return null;
   if (groups.length === 0) {
     return <div className="empty-state">Nenhum contrato encontrado para {orgao.sigla}.</div>;
   }

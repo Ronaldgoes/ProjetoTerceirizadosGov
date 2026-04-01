@@ -1,7 +1,7 @@
 import { Link } from "react-router-dom";
 import { ORGAOS } from "../data/organs";
 
-// Home principal com atalhos para orgaos e painel BI.
+// Home principal com atalhos para órgãos e painel BI.
 export default function OrgansHomePage() {
   const featuredOrgans = ORGAOS.slice(0, 4);
 

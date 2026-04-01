@@ -1,4 +1,4 @@
-// Normaliza textos para busca, comparacao e geracao de slug.
+// Normaliza textos para busca, comparação e geração de slug.
 export function normalizeText(text) {
   return String(text || "")
     .trim()
@@ -8,7 +8,7 @@ export function normalizeText(text) {
     .replace(/\s+/g, " ");
 }
 
-// Gera uma chave amigavel para usar na URL.
+// Gera uma chave amigável para usar na URL.
 export function slugifyText(text) {
   return (
     normalizeText(text)

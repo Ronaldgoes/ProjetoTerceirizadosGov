@@ -1,6 +1,6 @@
 import * as XLSX from "xlsx";
 
-// Indices padrao usados quando a planilha nao traz um cabecalho reconhecivel.
+// Índices padrão usados quando a planilha não traz um cabeçalho reconhecível.
 export const COL = {
   instrumento: 0,
   funcoes: 1,
@@ -13,7 +13,7 @@ export const COL = {
   postos: 8,
 };
 
-// Formata qualquer numero como moeda brasileira.
+// Formata qualquer número como moeda brasileira.
 export function fmtBRL(value) {
   if (value === undefined || value === null) return "--";
 
@@ -33,7 +33,7 @@ export function fmtNum(value) {
   return Number.isNaN(numericValue) ? "--" : numericValue.toLocaleString("pt-BR");
 }
 
-// Converte valores monetarios vindos da planilha em numero JavaScript.
+// Converte valores monetários vindos da planilha em número JavaScript.
 export function parseValor(value) {
   if (value === undefined || value === null || value === "") return 0;
   if (typeof value === "number" && !Number.isNaN(value)) return value;
@@ -63,7 +63,7 @@ export function parsePostos(value) {
   return Number.isNaN(numericValue) ? 0 : numericValue;
 }
 
-// Formata datas vindas da planilha, inclusive quando o Excel manda serial numerico.
+// Formata datas vindas da planilha, inclusive quando o Excel manda serial numérico.
 export function fmtDate(value) {
   if (value === undefined || value === null || value === "") return "--";
 
@@ -82,7 +82,7 @@ export function fmtDate(value) {
   return Number.isNaN(browserDate.getTime()) ? String(value) : browserDate.toLocaleDateString("pt-BR");
 }
 
-// Tenta encontrar um link real na celula do Excel, formula ou texto bruto.
+// Tenta encontrar um link real na célula do Excel, fórmula ou texto bruto.
 export function extrairLink(worksheet, rowIndex, colIndex, cellValue) {
   try {
     const cellAddress = XLSX.utils.encode_cell({ r: rowIndex, c: colIndex });

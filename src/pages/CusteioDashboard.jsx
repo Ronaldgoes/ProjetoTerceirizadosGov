@@ -16,6 +16,7 @@ const PAGE_TABS = [
   { key: "trends", label: "Evolução" },
   { key: "matrix", label: "Matriz" },
   { key: "ugRanking", label: "Ranking UG" },
+  { key: "alerts", label: "Alertas" },
   { key: "insights", label: "Dicas" },
 ];
 
@@ -411,7 +412,7 @@ function TopUgTrendLinesPanel({
                 <span className="bi-linechart-swatch" style={{ background: activeLine.color }} />
                 <div>
                   <strong>{activeLine.label}</strong>
-                  <span>Linha destacada no grafico</span>
+                  <span>Linha destacada no gráfico</span>
                   <span>{fmtCurrency(activeLine.total)}</span>
                 </div>
               </div>
@@ -650,6 +651,7 @@ function MultiSelectChecklist({
   onSearchChange,
   onToggleValue,
   onClear,
+  className = "",
 }) {
   const [isOpen, setIsOpen] = useState(false);
   const deferredSearchValue = useDeferredValue(searchValue);
@@ -657,7 +659,7 @@ function MultiSelectChecklist({
   const selectedLabels = options.filter((option) => selectedValues.includes(option.value)).map((option) => option.label);
 
   return (
-    <div className="bi-filter-group">
+    <div className={`bi-filter-group ${className}`}>
       <label>{label}</label>
       <div className="bi-multiselect">
         <button type="button" className="bi-multiselect-trigger" onClick={() => setIsOpen((open) => !open)}>
@@ -709,24 +711,223 @@ function createOptions(items) {
   }));
 }
 
+function getVariationMeta(startValue, endValue) {
+  if (startValue === 0 && endValue === 0) {
+    return { percent: 0, label: "0,0%", isNew: false };
+  }
+
+  if (startValue === 0 && endValue > 0) {
+    return { percent: Number.POSITIVE_INFINITY, label: "Novo", isNew: true };
+  }
+
+  const percent = ((endValue - startValue) / startValue) * 100;
+  return { percent, label: fmtPercent(percent), isNew: false };
+}
+
+function buildGroupedVariationRows({ records, metricKey, startPeriodKey, endPeriodKey, grouping, threshold }) {
+  if (!startPeriodKey || !endPeriodKey) return [];
+
+  const grouped = new Map();
+
+  const getLabel = (record) => {
+    if (grouping === "unidade") return record.unidadeGestoraLabel;
+    if (grouping === "elemento") return record.elementoLabel;
+    return record.subelementoLabel;
+  };
+
+  records.forEach((record) => {
+    if (record.periodKey !== startPeriodKey && record.periodKey !== endPeriodKey) return;
+
+    const label = getLabel(record) || "Não informado";
+    const current = grouped.get(label) || { label, startValue: 0, endValue: 0 };
+
+    if (record.periodKey === startPeriodKey) current.startValue += record[metricKey];
+    if (record.periodKey === endPeriodKey) current.endValue += record[metricKey];
+
+    grouped.set(label, current);
+  });
+
+  return [...grouped.values()]
+    .map((item) => {
+      const variation = getVariationMeta(item.startValue, item.endValue);
+
+      return {
+        ...item,
+        deltaValue: item.endValue - item.startValue,
+        variationPercent: variation.percent,
+        variationLabel: variation.label,
+        exceededThreshold: variation.isNew || variation.percent >= threshold,
+      };
+    })
+    .filter((item) => item.startValue > 0 || item.endValue > 0)
+    .sort((a, b) => {
+      if (a.exceededThreshold !== b.exceededThreshold) return a.exceededThreshold ? -1 : 1;
+      if (!Number.isFinite(a.variationPercent)) return -1;
+      if (!Number.isFinite(b.variationPercent)) return 1;
+      if (a.variationPercent === b.variationPercent) return b.endValue - a.endValue;
+      return b.variationPercent - a.variationPercent;
+    });
+}
+
+function buildHistoricalAverageRows({ records, metricKey, endPeriodKey, grouping, threshold }) {
+  if (!endPeriodKey) return [];
+
+  const orderedPeriods = [...new Set(records.map((record) => record.periodKey))].sort((a, b) => a.localeCompare(b));
+  const endIndex = orderedPeriods.indexOf(endPeriodKey);
+
+  if (endIndex <= 0) return [];
+
+  const previousPeriods = orderedPeriods.slice(Math.max(0, endIndex - 12), endIndex);
+  if (previousPeriods.length === 0) return [];
+
+  const getLabel = (record) => {
+    if (grouping === "unidade") return record.unidadeGestoraLabel;
+    if (grouping === "elemento") return record.elementoLabel;
+    return record.subelementoLabel;
+  };
+
+  const grouped = new Map();
+
+  const ensureGroup = (label) => {
+    if (!grouped.has(label)) {
+      grouped.set(label, {
+        label,
+        currentValue: 0,
+        previousValues: new Map(previousPeriods.map((periodKey) => [periodKey, 0])),
+      });
+    }
+
+    return grouped.get(label);
+  };
+
+  records.forEach((record) => {
+    const label = getLabel(record) || "Não informado";
+    const current = ensureGroup(label);
+
+    if (record.periodKey === endPeriodKey) {
+      current.currentValue += record[metricKey];
+    } else if (current.previousValues.has(record.periodKey)) {
+      current.previousValues.set(record.periodKey, current.previousValues.get(record.periodKey) + record[metricKey]);
+    }
+  });
+
+  return [...grouped.values()]
+    .map((item) => {
+      const averageValue = [...item.previousValues.values()].reduce((acc, value) => acc + value, 0) / previousPeriods.length;
+      const variation = getVariationMeta(averageValue, item.currentValue);
+
+      return {
+        label: item.label,
+        averageValue,
+        currentValue: item.currentValue,
+        deltaValue: item.currentValue - averageValue,
+        variationPercent: variation.percent,
+        variationLabel: variation.label,
+        exceededThreshold: variation.isNew || variation.percent >= threshold,
+      };
+    })
+    .filter((item) => item.averageValue > 0 || item.currentValue > 0)
+    .sort((a, b) => {
+      if (a.exceededThreshold !== b.exceededThreshold) return a.exceededThreshold ? -1 : 1;
+      if (!Number.isFinite(a.variationPercent)) return -1;
+      if (!Number.isFinite(b.variationPercent)) return 1;
+      if (a.variationPercent === b.variationPercent) return b.currentValue - a.currentValue;
+      return b.variationPercent - a.variationPercent;
+    });
+}
+
+function AlertTable({ title, rows, baseLabel, compareLabel, emptyMessage, totalValue = 0 }) {
+  const alertsCount = rows.filter((r) => r.exceededThreshold).length;
+  const avgVariation = rows.length > 0
+    ? rows.reduce((acc, r) => acc + (Number.isFinite(r.variationPercent) ? r.variationPercent : 0), 0) / rows.length
+    : 0;
+
+  return (
+    <section className="bi-panel">
+      <div className="bi-panel-header">
+        <div>
+          <h3>{title}</h3>
+          {rows.length > 0 && (
+            <div className="bi-alert-summary-mini">
+              <span>{alertsCount} em alerta</span>
+              <span>•</span>
+              <span>{avgVariation.toFixed(1)}% média de desvio</span>
+            </div>
+          )}
+        </div>
+      </div>
+
+      {rows.length > 0 ? (
+        <div className="bi-alert-table">
+          <div className="bi-alert-row bi-alert-head">
+            <span>Categoria</span>
+            <span>{baseLabel}</span>
+            <span>{compareLabel}</span>
+            <span>Variação</span>
+            <span>Impacto</span>
+            <span>Diferença</span>
+          </div>
+          {rows.map((row) => {
+            const compareVal = row.endValue ?? row.currentValue;
+            const impact = totalValue > 0 ? (compareVal / totalValue) * 100 : 0;
+            const isCritical = row.variationPercent > 50 || !Number.isFinite(row.variationPercent);
+            const isHigh = row.variationPercent > 25;
+
+            return (
+              <div key={row.label} className={`bi-alert-row${row.exceededThreshold ? " is-alert" : ""}${isCritical ? " is-critical" : ""}`}>
+                <div className="bi-alert-category">
+                  {row.exceededThreshold && (
+                    <span className={`bi-alert-badge ${isCritical ? "critical" : isHigh ? "high" : "warning"}`}>
+                      {isCritical ? "Crítico" : isHigh ? "Alto" : "Atenção"}
+                    </span>
+                  )}
+                  <strong>{row.label}</strong>
+                </div>
+                <span>{fmtCurrency(row.startValue ?? row.averageValue)}</span>
+                <span>{fmtCurrency(compareVal)}</span>
+                <span
+                  className={`bi-alert-trend ${
+                    Number.isFinite(row.variationPercent) ? (row.variationPercent >= 0 ? "positive" : "negative") : "positive"
+                  }`}
+                >
+                  {row.variationPercent >= 0 ? "📈" : "📉"} {row.variationLabel}
+                </span>
+                <span className="bi-alert-impact">{impact.toFixed(1)}% do total</span>
+                <span>{fmtCurrency(row.deltaValue)}</span>
+              </div>
+            );
+          })}
+        </div>
+      ) : (
+        <div className="empty-state">{emptyMessage}</div>
+      )}
+    </section>
+  );
+}
+
 export default function CusteioDashboard() {
   const [dataset, setDataset] = useState(null);
+  const [lastManualUpdate, setLastManualUpdate] = useState(null);
   const [status, setStatus] = useState("Carregando painel...");
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [refreshInfo, setRefreshInfo] = useState("");
   const [selectedYear, setSelectedYear] = useState("all");
   const [selectedMetric, setSelectedMetric] = useState("vlliquidado");
-  const [selectedElemento, setSelectedElemento] = useState("all");
+  const [selectedElementos, setSelectedElementos] = useState([]);
   const [selectedSubelementos, setSelectedSubelementos] = useState([]);
-  const [selectedUnidade, setSelectedUnidade] = useState("all");
+  const [selectedUnidades, setSelectedUnidades] = useState([]);
   const [selectedPeriodStart, setSelectedPeriodStart] = useState("all");
   const [selectedPeriodEnd, setSelectedPeriodEnd] = useState("all");
   const [selectedRankingPeriod, setSelectedRankingPeriod] = useState(null);
+  const [alertThreshold, setAlertThreshold] = useState(10);
+  const [alertGrouping, setAlertGrouping] = useState("subelemento");
   const [activeTab, setActiveTab] = useState("overview");
   const [globalSearch, setGlobalSearch] = useState("");
+  const [appliedSearch, setAppliedSearch] = useState("");
   const [matrixSearch, setMatrixSearch] = useState("");
+  const [elementoSearch, setElementoSearch] = useState("");
   const [subelementoSearch, setSubelementoSearch] = useState("");
-  const deferredGlobalSearch = useDeferredValue(globalSearch);
+  const [unidadeSearch, setUnidadeSearch] = useState("");
   const deferredMatrixSearch = useDeferredValue(matrixSearch);
 
   useEffect(() => {
@@ -781,6 +982,7 @@ export default function CusteioDashboard() {
 
       const officialCache = await response.json();
       setDataset(officialCache);
+      setLastManualUpdate(new Date());
       setStatus("");
       setRefreshInfo(
         syncCompleted
@@ -795,13 +997,16 @@ export default function CusteioDashboard() {
   };
 
   const updatedAtLabel = useMemo(() => {
-    if (!dataset?.generatedAt) return "Cache local";
+    const baseDate = dataset?.generatedAt ? new Date(dataset.generatedAt) : null;
+    const dateToUse = lastManualUpdate || baseDate;
+
+    if (!dateToUse) return "Cache local";
 
     return new Intl.DateTimeFormat("pt-BR", {
       dateStyle: "short",
       timeStyle: "short",
-    }).format(new Date(dataset.generatedAt));
-  }, [dataset]);
+    }).format(dateToUse);
+  }, [dataset, lastManualUpdate]);
 
   const dimensionLookup = useMemo(() => {
     if (!dataset) {
@@ -869,16 +1074,42 @@ export default function CusteioDashboard() {
     };
   }, [dataset]);
 
-  const visibleRecords = useMemo(() => {
+  const historyScopedRecords = useMemo(() => {
     if (!records.length) return [];
-    const searchText = normalize(deferredGlobalSearch);
+    const searchText = normalize(appliedSearch);
 
     return records.filter((record) => {
       const yearOk = selectedYear === "all" || record.year === Number(selectedYear);
-      const elementoOk = selectedElemento === "all" || record.elementoCode === selectedElemento;
+      const elementoOk = selectedElementos.length === 0 || selectedElementos.includes(record.elementoCode);
+      const subelementoOk = selectedSubelementos.length === 0 || selectedSubelementos.includes(record.subelementoCode);
+      const unidadeOk = selectedUnidades.length === 0 || selectedUnidades.includes(record.unidadeGestoraCode);
+      const searchOk =
+        !searchText ||
+        [record.elementoLabel, record.subelementoLabel, record.unidadeGestoraLabel, record.periodKey, record.year]
+          .map((item) => normalize(item))
+          .some((item) => item.includes(searchText));
+
+      return yearOk && elementoOk && subelementoOk && unidadeOk && searchOk;
+    });
+  }, [
+    appliedSearch,
+    records,
+    selectedElementos,
+    selectedSubelementos,
+    selectedUnidades,
+    selectedYear,
+  ]);
+
+  const visibleRecords = useMemo(() => {
+    if (!records.length) return [];
+    const searchText = normalize(appliedSearch);
+
+    return records.filter((record) => {
+      const yearOk = selectedYear === "all" || record.year === Number(selectedYear);
+      const elementoOk = selectedElementos.length === 0 || selectedElementos.includes(record.elementoCode);
       const subelementoOk =
         selectedSubelementos.length === 0 || selectedSubelementos.includes(record.subelementoCode);
-      const unidadeOk = selectedUnidade === "all" || record.unidadeGestoraCode === selectedUnidade;
+      const unidadeOk = selectedUnidades.length === 0 || selectedUnidades.includes(record.unidadeGestoraCode);
       const periodStartOk = selectedPeriodStart === "all" || record.periodKey >= selectedPeriodStart;
       const periodEndOk = selectedPeriodEnd === "all" || record.periodKey <= selectedPeriodEnd;
       const searchOk =
@@ -890,15 +1121,26 @@ export default function CusteioDashboard() {
       return yearOk && elementoOk && subelementoOk && unidadeOk && periodStartOk && periodEndOk && searchOk;
     });
   }, [
-    deferredGlobalSearch,
+    appliedSearch,
     records,
-    selectedElemento,
+    selectedElementos,
     selectedPeriodEnd,
     selectedPeriodStart,
     selectedSubelementos,
-    selectedUnidade,
+    selectedUnidades,
     selectedYear,
   ]);
+
+  const visiblePeriods = useMemo(
+    () =>
+      [...new Set(visibleRecords.map((record) => record.periodKey))]
+        .sort((a, b) => a.localeCompare(b))
+        .map((periodKey) => ({
+          periodKey,
+          label: `${periodKey} - ${dataset?.periodLabels?.[periodKey] || periodKey}`,
+        })),
+    [dataset, visibleRecords]
+  );
 
   const totalMetrics = useMemo(
     () =>
@@ -1034,6 +1276,64 @@ export default function CusteioDashboard() {
     };
   }, [monthlyVariationRows]);
 
+  const effectiveAlertStartPeriod = selectedPeriodStart === "all" ? visiblePeriods[0]?.periodKey || null : selectedPeriodStart;
+  const effectiveAlertEndPeriod =
+    selectedPeriodEnd === "all" ? visiblePeriods.at(-1)?.periodKey || null : selectedPeriodEnd;
+
+  const periodComparisonRows = useMemo(
+    () =>
+      buildGroupedVariationRows({
+        records: visibleRecords,
+        metricKey: selectedMetric,
+        startPeriodKey: effectiveAlertStartPeriod,
+        endPeriodKey: effectiveAlertEndPeriod,
+        grouping: alertGrouping,
+        threshold: alertThreshold,
+      }),
+    [alertGrouping, alertThreshold, effectiveAlertEndPeriod, effectiveAlertStartPeriod, selectedMetric, visibleRecords]
+  );
+
+  const historicalAlertRows = useMemo(
+    () =>
+      buildHistoricalAverageRows({
+        records: historyScopedRecords,
+        metricKey: selectedMetric,
+        endPeriodKey: effectiveAlertEndPeriod,
+        grouping: alertGrouping,
+        threshold: alertThreshold,
+      }),
+    [alertGrouping, alertThreshold, effectiveAlertEndPeriod, historyScopedRecords, selectedMetric]
+  );
+
+  const periodEndTotal = useMemo(() => {
+    if (!effectiveAlertEndPeriod) return 0;
+    return visibleRecords
+      .filter((r) => r.periodKey === effectiveAlertEndPeriod)
+      .reduce((acc, r) => acc + r[selectedMetric], 0);
+  }, [effectiveAlertEndPeriod, selectedMetric, visibleRecords]);
+
+  const alertInsightCards = useMemo(() => {
+    const exceededPeriodCount = periodComparisonRows.filter((row) => row.exceededThreshold).length;
+    const exceededHistoryCount = historicalAlertRows.filter((row) => row.exceededThreshold).length;
+    const highestPeriodAlert = periodComparisonRows[0];
+    const highestHistoryAlert = historicalAlertRows[0];
+
+    return [
+      { label: "Limite atual de alerta", value: `${alertThreshold.toFixed(0)}%` },
+      { label: "Alertas entre períodos", value: String(exceededPeriodCount) },
+      { label: "Alertas sobre média histórica", value: String(exceededHistoryCount) },
+      { label: "Maior variação entre períodos", value: highestPeriodAlert ? highestPeriodAlert.label : "--" },
+      { label: "Maior desvio histórico", value: highestHistoryAlert ? highestHistoryAlert.label : "--" },
+      {
+        label: "Comparação-base",
+        value:
+          effectiveAlertStartPeriod && effectiveAlertEndPeriod
+            ? `${effectiveAlertStartPeriod} → ${effectiveAlertEndPeriod}`
+            : "--",
+      },
+    ];
+  }, [alertThreshold, effectiveAlertEndPeriod, effectiveAlertStartPeriod, historicalAlertRows, periodComparisonRows]);
+
   const years = yearlyVisibleTotals.map((item) => item.year);
   const matrixBySubelemento = useMemo(
     () =>
@@ -1067,21 +1367,49 @@ export default function CusteioDashboard() {
   const clearFilters = () => {
     setSelectedYear("all");
     setSelectedMetric("vlliquidado");
-    setSelectedElemento("all");
+    setSelectedElementos([]);
     setSelectedSubelementos([]);
-    setSelectedUnidade("all");
+    setSelectedUnidades([]);
     setSelectedPeriodStart("all");
     setSelectedPeriodEnd("all");
     setSelectedRankingPeriod(null);
+    setAlertThreshold(10);
+    setAlertGrouping("subelemento");
     setGlobalSearch("");
+    setAppliedSearch("");
     setMatrixSearch("");
+    setElementoSearch("");
     setSubelementoSearch("");
+    setUnidadeSearch("");
+  };
+
+  const toggleElemento = (value) => {
+    setSelectedElementos((current) =>
+      current.includes(value) ? current.filter((item) => item !== value) : [...current, value]
+    );
   };
 
   const toggleSubelemento = (value) => {
     setSelectedSubelementos((current) =>
       current.includes(value) ? current.filter((item) => item !== value) : [...current, value]
     );
+  };
+
+  const toggleUnidade = (value) => {
+    setSelectedUnidades((current) =>
+      current.includes(value) ? current.filter((item) => item !== value) : [...current, value]
+    );
+  };
+
+  const handleSearch = (e) => {
+    if (e) e.preventDefault();
+    setAppliedSearch(globalSearch);
+  };
+
+  const handleSearchKeyDown = (e) => {
+    if (e.key === "Enter") {
+      handleSearch();
+    }
   };
 
   if (!dataset && status) return <div className="bi-loading">{status}</div>;
@@ -1116,14 +1444,25 @@ export default function CusteioDashboard() {
 
         <div className="bi-filters bi-filters-grid">
           <div className="bi-filter-group bi-filter-group-wide">
-            <label htmlFor="global-search">Pesquisar no painel</label>
-            <input
-              id="global-search"
-              className="bi-search-input"
-              placeholder="Pesquisar elemento, subelemento, unidade ou período..."
-              value={globalSearch}
-              onChange={(e) => setGlobalSearch(e.target.value)}
-            />
+            <label htmlFor="global-search">Pesquisa</label>
+            <div className="bi-search-container">
+              <input
+                id="global-search"
+                className="bi-search-input"
+                placeholder="Escreva para pesquisar nos outros filtros..."
+                value={globalSearch}
+                onChange={(e) => setGlobalSearch(e.target.value)}
+                onKeyDown={handleSearchKeyDown}
+              />
+              <button
+                type="button"
+                className="bi-search-button"
+                onClick={() => handleSearch()}
+                aria-label="Pesquisar"
+              >
+                🔍
+              </button>
+            </div>
           </div>
 
           <div className="bi-filter-group">
@@ -1173,17 +1512,16 @@ export default function CusteioDashboard() {
             </select>
           </div>
 
-          <div className="bi-filter-group">
-            <label htmlFor="elemento-select">Elemento</label>
-            <select id="elemento-select" value={selectedElemento} onChange={(e) => setSelectedElemento(e.target.value)}>
-              <option value="all">Todos</option>
-              {dimensionOptions.elementos.map((item) => (
-                <option key={item.value} value={item.value}>
-                  {item.label}
-                </option>
-              ))}
-            </select>
-          </div>
+          <MultiSelectChecklist
+            label="Elementos"
+            placeholder="Buscar código ou nome..."
+            options={dimensionOptions.elementos}
+            selectedValues={selectedElementos}
+            searchValue={elementoSearch}
+            onSearchChange={setElementoSearch}
+            onToggleValue={toggleElemento}
+            onClear={() => setSelectedElementos([])}
+          />
 
           <MultiSelectChecklist
             label="Subelementos"
@@ -1196,17 +1534,17 @@ export default function CusteioDashboard() {
             onClear={() => setSelectedSubelementos([])}
           />
 
-          <div className="bi-filter-group bi-filter-group-wide">
-            <label htmlFor="unidade-select">Unidade gestora</label>
-            <select id="unidade-select" value={selectedUnidade} onChange={(e) => setSelectedUnidade(e.target.value)}>
-              <option value="all">Todas</option>
-              {dimensionOptions.unidades.map((item) => (
-                <option key={item.value} value={item.value}>
-                  {item.label}
-                </option>
-              ))}
-            </select>
-          </div>
+          <MultiSelectChecklist
+            label="Unidades Gestoras"
+            placeholder="Buscar código ou nome..."
+            options={dimensionOptions.unidades}
+            selectedValues={selectedUnidades}
+            searchValue={unidadeSearch}
+            onSearchChange={setUnidadeSearch}
+            onToggleValue={toggleUnidade}
+            onClear={() => setSelectedUnidades([])}
+            className="bi-filter-group-wide"
+          />
 
           <div className="bi-filter-actions">
             <button type="button" className="bi-clear-button" onClick={clearFilters}>
@@ -1372,6 +1710,75 @@ export default function CusteioDashboard() {
             onSelectPeriod={setSelectedRankingPeriod}
           />
         </section>
+      )}
+
+      {activeTab === "alerts" && (
+        <>
+          <section className="bi-grid">
+            <section className="bi-panel">
+              <div className="bi-panel-header">
+                <h3>Monitoramento contínuo</h3>
+                <span>Leitura incremental sobre a base oficial</span>
+              </div>
+
+              <div className="bi-alert-controls">
+                <div className="bi-filter-group">
+                  <label htmlFor="alert-grouping">Agrupamento da leitura</label>
+                  <select id="alert-grouping" value={alertGrouping} onChange={(e) => setAlertGrouping(e.target.value)}>
+                    <option value="subelemento">Subelemento</option>
+                    <option value="unidade">Unidade gestora</option>
+                    <option value="elemento">Elemento</option>
+                  </select>
+                </div>
+
+                <div className="bi-filter-group">
+                  <label htmlFor="alert-threshold">Limite de alerta (%)</label>
+                  <input
+                    id="alert-threshold"
+                    type="number"
+                    min="0"
+                    step="1"
+                    className="bi-search-input"
+                    value={alertThreshold}
+                    onChange={(e) => setAlertThreshold(Math.max(0, Number(e.target.value) || 0))}
+                  />
+                </div>
+              </div>
+
+              <div className="bi-narrative">
+                <p>
+                  Esta trilha compara o primeiro e o último período do recorte atual e também verifica se o último
+                  período ficou acima da média dos 12 meses anteriores.
+                </p>
+                <p>
+                  Sugestão de leitura: 10% para alertas mensais e 50% para leituras anuais. O ajuste aqui afeta somente
+                  esta aba.
+                </p>
+              </div>
+            </section>
+
+            <InsightCards cards={alertInsightCards} />
+          </section>
+
+          <section className="bi-grid bi-grid-single">
+            <AlertTable
+              title="Variações acima do limite entre o início e o fim do recorte"
+              rows={periodComparisonRows.slice(0, 12)}
+              baseLabel={effectiveAlertStartPeriod || "Início"}
+              compareLabel={effectiveAlertEndPeriod || "Fim"}
+              emptyMessage="Selecione um intervalo com ao menos dois períodos para montar os alertas de comparação."
+              totalValue={periodEndTotal}
+            />
+            <AlertTable
+              title="Desvios acima da média histórica"
+              rows={historicalAlertRows.slice(0, 12)}
+              baseLabel="Média 12 meses"
+              compareLabel={effectiveAlertEndPeriod || "Período final"}
+              emptyMessage="Ainda não há histórico suficiente para comparar o último período com a média anterior."
+              totalValue={periodEndTotal}
+            />
+          </section>
+        </>
       )}
 
       {activeTab === "insights" && (

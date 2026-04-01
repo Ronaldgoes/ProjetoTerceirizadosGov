@@ -1,4 +1,4 @@
-// Lista central dos orgaos exibidos na home e na dashboard.
+// Lista central dos órgãos exibidos na home e na dashboard.
 export const ORGAOS = [
   { id: "detran", sigla: "DETRAN", nome: "DETRAN - Departamento de Trânsito", arquivo: "detran.xlsx" },
   { id: "sejuri", sigla: "SEJURI", nome: "SEJURI - Secretaria de Estado de Justiça e Reintegração Social", arquivo: "sejuri.xlsx" },
