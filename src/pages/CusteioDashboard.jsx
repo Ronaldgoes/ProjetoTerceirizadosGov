@@ -1,7 +1,10 @@
 import { useDeferredValue, useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
+import NotificationBell from "../components/NotificationBell";
 import { CUSTEIO_DATA_CONTRACT } from "../config/custeioDataContract";
 import { CUSTEIO_DATA_SOURCE } from "../config/custeioDataSource";
+import { useAuth } from "../hooks/useAuth";
+import ThemeToggle from "../components/ThemeToggle";
 
 const METRICS = [
   { key: "vlempenhado", label: "Empenhado" },
@@ -906,6 +909,7 @@ function AlertTable({ title, rows, baseLabel, compareLabel, emptyMessage, totalV
 }
 
 export default function CusteioDashboard() {
+  const { user, logout, isAdmin } = useAuth();
   const [dataset, setDataset] = useState(null);
   const [lastManualUpdate, setLastManualUpdate] = useState(null);
   const [status, setStatus] = useState("Carregando painel...");
@@ -1422,6 +1426,20 @@ export default function CusteioDashboard() {
           <Link to="/" className="bi-home-button">
             Home
           </Link>
+          <Link to="/monitoramento" className="bi-home-button">
+            Monitoramento
+          </Link>
+          {isAdmin ? (
+            <Link to="/admin" className="bi-home-button">
+              Admin
+            </Link>
+          ) : null}
+          <span className="header-status">{user?.email}</span>
+          <NotificationBell />
+          <ThemeToggle />
+          <button type="button" className="bi-refresh-button" onClick={logout}>
+            Sair
+          </button>
         </div>
         <div className="bi-refresh-stack">
           <button type="button" className="bi-refresh-button" onClick={refreshDashboard} disabled={isRefreshing}>

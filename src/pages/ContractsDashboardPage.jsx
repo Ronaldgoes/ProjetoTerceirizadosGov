@@ -1,6 +1,9 @@
 import { useEffect, useMemo, useState } from "react";
 import { NavLink, Route, Routes, useLocation, useParams } from "react-router-dom";
 import ContractsTable from "../components/ContractsTable";
+import NotificationBell from "../components/NotificationBell";
+import ThemeToggle from "../components/ThemeToggle";
+import { useAuth } from "../hooks/useAuth";
 import { ORGAOS } from "../data/organs";
 import { buildContractGroups } from "../utils/contractGroups";
 import { normalizeText } from "../utils/textHelpers";
@@ -74,6 +77,7 @@ function ContractDetailsSection({ groups, orgao, search }) {
 // Página da dashboard operacional por órgão.
 export default function ContractsDashboardPage() {
   const { orgaoId } = useParams();
+  const { user, logout, isAdmin } = useAuth();
   const location = useLocation();
   const [records, setRecords] = useState([]);
   const [search, setSearch] = useState("");
@@ -98,17 +102,6 @@ export default function ContractsDashboardPage() {
 
     loadOrganSpreadsheet();
   }, [currentOrgan]);
-
-  // Fecha o menu lateral ao trocar de rota.
-  useEffect(() => {
-    setMenuOpen(false);
-  }, [location.pathname]);
-
-  const filteredRecords = useMemo(() => {
-    return records.filter((row) =>
-      Object.values(row).some((value) => normalizeText(value).includes(normalizeText(search)))
-    );
-  }, [records, search]);
 
   const contractGroups = useMemo(() => buildContractGroups(records), [records]);
 
@@ -145,6 +138,20 @@ export default function ContractsDashboardPage() {
 
         <div className="header-actions">
           <span className="header-status">{statusMessage}</span>
+          <span className="header-status">{user?.email}</span>
+          <NavLink to="/monitoramento" className="nav-chip">
+            Monitoramento
+          </NavLink>
+          {isAdmin ? (
+            <NavLink to="/admin" className="nav-chip">
+              Admin
+            </NavLink>
+          ) : null}
+          <NotificationBell />
+          <ThemeToggle />
+          <button type="button" className="nav-chip nav-chip-button" onClick={logout}>
+            Sair
+          </button>
         </div>
       </header>
 
