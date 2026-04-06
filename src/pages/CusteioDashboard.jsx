@@ -1,29 +1,37 @@
 import { useDeferredValue, useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
-import NotificationBell from "../components/NotificationBell";
+import TopBar from "../components/TopBar";
 import { CUSTEIO_DATA_CONTRACT } from "../config/custeioDataContract";
 import { CUSTEIO_DATA_SOURCE } from "../config/custeioDataSource";
 import { useAuth } from "../hooks/useAuth";
 import ThemeToggle from "../components/ThemeToggle";
 
 const METRICS = [
-  { key: "vlempenhado", label: "Empenhado" },
-  { key: "vlliquidado", label: "Liquidado" },
-  { key: "vlpago", label: "Pago" },
+  { key: "vlempenhado", label: "Empenhamento" },
+  { key: "vlliquidado", label: "Liquidação" },
+  { key: "vlpago", label: "Pagamento" },
 ];
 
 const PAGE_TABS = [
-  { key: "overview", label: "Visão geral" },
-  { key: "monthly", label: "Visão mensal" },
+  { key: "overview", label: "Visão Anual" },
+  { key: "monthly", label: "Visão Mensal" },
   { key: "distribution", label: "Distribuição" },
-  { key: "trends", label: "Evolução" },
+  { key: "trends", label: "Ranking" },
   { key: "matrix", label: "Matriz" },
-  { key: "ugRanking", label: "Ranking UG" },
+  { key: "ugRanking", label: "Evolução" },
   { key: "alerts", label: "Alertas" },
-  { key: "insights", label: "Dicas" },
 ];
 
 const MONTH_SHORT_LABELS = ["Jan", "Fev", "Mar", "Abr", "Mai", "Jun", "Jul", "Ago", "Set", "Out", "Nov", "Dez"];
+
+const IPCA_ANUAL = {
+  2021: 10.06,
+  2022: 5.79,
+  2023: 4.62,
+  2024: 4.42,
+  2025: 4.50,
+  2026: 4.00,
+};
 
 const fmtCurrency = (value) =>
   new Intl.NumberFormat("pt-BR", {
@@ -51,50 +59,107 @@ const normalize = (value) =>
     .replace(/\p{Diacritic}/gu, "")
     .trim();
 
-function aggregateBy(records, key, metricKey, limit = 8) {
+function aggregateBy(records, key, metricKey, limit = 10, groupOthers = false) {
   const totals = new Map();
 
   records.forEach((record) => {
+    const val = Number(record[metricKey] || 0);
     const mapKey = record[key] || "Não informado";
-    totals.set(mapKey, (totals.get(mapKey) || 0) + Number(record[metricKey] || 0));
+    totals.set(mapKey, (totals.get(mapKey) || 0) + val);
   });
 
-  return [...totals.entries()]
+  const sorted = [...totals.entries()]
     .map(([label, value]) => ({ label, value }))
-    .sort((a, b) => b.value - a.value)
-    .slice(0, limit);
+    .sort((a, b) => b.value - a.value);
+
+  if (!groupOthers || sorted.length <= limit) {
+    return sorted.slice(0, limit);
+  }
+
+  const top = sorted.slice(0, limit);
+  const othersValue = sorted.slice(limit).reduce((acc, item) => acc + item.value, 0);
+
+  return [
+    ...top,
+    { label: "Outras Despesas", value: othersValue },
+  ];
 }
 
-function buildPieSegments(items) {
+function buildPieSegments(items, selectedLabels = null, primaryLabel = null) {
   const total = items.reduce((acc, item) => acc + item.value, 0) || 1;
   let current = 0;
-  const colors = ["#38BDF8", "#10B981", "#F59E0B", "#F97316", "#A78BFA", "#FB7185", "#22C55E", "#EAB308"];
+  // Professional BI color palette
+  const colors = ["#3B82F6", "#10B981", "#F59E0B", "#EF4444", "#8B5CF6", "#EC4899", "#F97316", "#06B6D4"];
 
   const segments = items.map((item, index) => {
     const start = current;
     const pct = (item.value / total) * 100;
     current += pct;
 
+    let color = colors[index % colors.length];
+    
+    const isSelected = selectedLabels?.has(item.label);
+    const hasSelection = selectedLabels && selectedLabels.size > 0;
+    const finalColor = hasSelection && !isSelected ? `${color}1A` : color;
+    
     return {
       ...item,
       pct,
-      color: colors[index % colors.length],
-      range: `${colors[index % colors.length]} ${start}% ${current}%`,
+      color, // Original color for legend
+      range: `${finalColor} ${start.toFixed(2)}% ${current.toFixed(2)}%`,
     };
   });
 
   return {
     segments,
     background: `conic-gradient(${segments.map((segment) => segment.range).join(", ")})`,
+    activeSegment: segments.find((segment) => segment.label === primaryLabel) || null,
+    highlightedSegments: selectedLabels ? segments.filter((segment) => selectedLabels.has(segment.label)) : [],
+    total,
   };
 }
 
-function buildMatrixRows(records, groupKey, metricKey, years, limit, search) {
+function buildDistributionRelations(records, sourceKey, targetKey, metricKey) {
   const grouped = new Map();
 
   records.forEach((record) => {
+    const sourceLabel = record[sourceKey] || "Não informado";
+    const targetLabel = record[targetKey] || "Não informado";
+    const current = grouped.get(sourceLabel) || new Map();
+    current.set(targetLabel, (current.get(targetLabel) || 0) + record[metricKey]);
+    grouped.set(sourceLabel, current);
+  });
+
+  return new Map(
+    [...grouped.entries()].map(([sourceLabel, targetMap]) => {
+      const total = [...targetMap.values()].reduce((acc, value) => acc + value, 0);
+      const items = [...targetMap.entries()]
+        .map(([label, value]) => ({
+          label,
+          value,
+          pct: total > 0 ? (value / total) * 100 : 0,
+        }))
+        .sort((a, b) => b.value - a.value)
+        .slice(0, 3);
+
+      return [sourceLabel, { total, items }];
+    })
+  );
+}
+
+function buildMatrixRows(records, groupKey, metricKey, years, limit, search, selectedCodes = null, codeKey = "") {
+  const grouped = new Map();
+
+  records.forEach((record) => {
+    // Row filtering: only include selected codes if any are provided
+    if (selectedCodes && !selectedCodes.includes(record[codeKey])) {
+      return;
+    }
+
     const key = record[groupKey] || "Não informado";
     const item = grouped.get(key) || { label: key, total: 0, byYear: {} };
+    
+    // Column filtering is handled by the 'years' array passed to map below
     item.byYear[record.year] = (item.byYear[record.year] || 0) + record[metricKey];
     item.total += record[metricKey];
     grouped.set(key, item);
@@ -120,7 +185,7 @@ function MetricCard({ label, value, secondary }) {
   );
 }
 
-function BarList({ title, items }) {
+function BarList({ title, items, onClickItem, selectedItem, limitHeight = false }) {
   const maxValue = items[0]?.value || 1;
 
   return (
@@ -129,9 +194,15 @@ function BarList({ title, items }) {
         <h3>{title}</h3>
       </div>
 
-      <div className="bi-bar-list">
+      <div className={`bi-bar-list${limitHeight ? " is-scrollable" : ""}`}>
         {items.map((item) => (
-          <div key={item.label} className="bi-bar-item">
+          <div
+            key={item.label}
+            className={`bi-bar-item${selectedItem === item.label ? " is-selected" : ""}${
+              onClickItem ? " is-clickable" : ""
+            }`}
+            onClick={() => onClickItem?.(item.label === selectedItem ? null : item.label)}
+          >
             <div className="bi-bar-copy">
               <strong>{item.label}</strong>
               <span>{fmtCurrency(item.value)}</span>
@@ -146,7 +217,9 @@ function BarList({ title, items }) {
   );
 }
 
-function TopRankingPanel({ title, items }) {
+function TopRankingPanel({ title, items, limit = 10 }) {
+  const displayedItems = items.slice(0, limit);
+
   return (
     <section className="bi-panel">
       <div className="bi-panel-header">
@@ -154,7 +227,7 @@ function TopRankingPanel({ title, items }) {
       </div>
 
       <div className="bi-ranking-list">
-        {items.map((item, index) => (
+        {displayedItems.map((item, index) => (
           <article key={item.label} className="bi-ranking-item">
             <span className="bi-ranking-position">{String(index + 1).padStart(2, "0")}</span>
             <div className="bi-ranking-copy">
@@ -163,13 +236,30 @@ function TopRankingPanel({ title, items }) {
             </div>
           </article>
         ))}
+        {items.length > limit && (
+          <div className="bi-ranking-footer">
+            Exibindo top {limit} de {items.length} itens.
+          </div>
+        )}
       </div>
     </section>
   );
 }
 
-function PiePanel({ title, items }) {
-  const { segments, background } = buildPieSegments(items);
+function PiePanel({ title, items, panelKey, hoveredState, onHoverChange, relationInfo, relationTargetLabel, othersItems = [] }) {
+  const hoveredLabel = hoveredState?.source === panelKey ? hoveredState.label : null;
+  const isOthersSelected = hoveredLabel === "Outras Despesas";
+  const relatedLabels =
+    hoveredState?.source && hoveredState.source !== panelKey
+      ? new Set(relationInfo?.items.map((item) => item.label) || [])
+      : null;
+  const selectedLabels = hoveredLabel ? new Set([hoveredLabel]) : relatedLabels;
+  const { segments, background, activeSegment, highlightedSegments } = buildPieSegments(
+    items,
+    selectedLabels,
+    hoveredLabel
+  );
+  const hasCrossSelection = !hoveredLabel && highlightedSegments.length > 0;
 
   return (
     <section className="bi-panel">
@@ -178,36 +268,123 @@ function PiePanel({ title, items }) {
       </div>
 
       <div className="bi-pie-layout">
-        <div className="bi-pie-chart" style={{ background }} />
+        <div className={`bi-pie-chart${activeSegment ? " is-active" : ""}${hasCrossSelection ? " is-related-active" : ""}`} style={{ background }}>
+          <div className="bi-pie-center-copy">
+            {activeSegment ? (
+              <>
+                <strong>{fmtPercent(activeSegment.pct)}</strong>
+                <span>{fmtCurrency(activeSegment.value)}</span>
+                <small>{activeSegment.label}</small>
+              </>
+            ) : hasCrossSelection ? (
+              <>
+                <strong>{highlightedSegments.length}</strong>
+                <span>{fmtCurrency(relationInfo?.total || 0)}</span>
+                <small>{relationTargetLabel}</small>
+              </>
+            ) : (
+              <>
+                <strong>{items.length}</strong>
+                <span>itens no painel</span>
+                <small>Clique para destacar</small>
+              </>
+            )}
+          </div>
+        </div>
         <div className="bi-pie-legend">
-          {segments.map((segment) => (
-            <div key={segment.label} className="bi-pie-item">
-              <span className="bi-pie-dot" style={{ background: segment.color }} />
-              <div>
-                <strong>{segment.label}</strong>
-                <span>
-                  {fmtPercent(segment.pct)} | {fmtCurrency(segment.value)}
-                </span>
+          {segments.map((segment) => {
+            const isHovered = hoveredLabel === segment.label;
+            const isOtherHovered = hoveredLabel && !isHovered;
+            const isRelated = relatedLabels?.has(segment.label);
+
+            return (
+              <div
+                key={segment.label}
+                className={`bi-pie-item${isHovered ? " is-highlighted" : ""}${isOtherHovered ? " is-dimmed" : ""}${
+                  isRelated ? " is-related" : ""
+                }`}
+                onClick={() =>
+                  onHoverChange?.(
+                    hoveredState?.source === panelKey && hoveredState?.label === segment.label
+                      ? null
+                      : { source: panelKey, label: segment.label }
+                  )
+                }
+              >
+                <span className="bi-pie-dot" style={{ background: segment.color }} />
+                <div>
+                  <strong>{segment.label}</strong>
+                  <span className="bi-pie-meta">
+                    {fmtPercent(segment.pct)} | {fmtCurrency(segment.value)}
+                  </span>
+                </div>
               </div>
-            </div>
-          ))}
+            );
+          })}
         </div>
       </div>
+
+      {isOthersSelected && othersItems.length > 0 ? (
+        <div className="bi-pie-relationship-card">
+          <strong>Composição de Outras Despesas</strong>
+          <div className="bi-pie-relationship-list">
+            {othersItems.slice(0, 10).map((item) => (
+              <div key={`${panelKey}-others-${item.label}`} className="bi-pie-relationship-item">
+                <span>{item.label}</span>
+                <span>{fmtCurrency(item.value)}</span>
+              </div>
+            ))}
+          </div>
+          {othersItems.length > 10 ? (
+            <div className="bi-pie-relationship-footnote">Exibindo 10 de {othersItems.length} itens agrupados em outras despesas.</div>
+          ) : null}
+          <button type="button" className="bi-pie-clear-selection" onClick={() => onHoverChange?.(null)}>
+            Limpar seleção
+          </button>
+        </div>
+      ) : hoveredState && relationInfo ? (
+        <div className="bi-pie-relationship-card">
+          <strong>
+            {hoveredState.label}
+            {" -> "}
+            {relationTargetLabel}
+          </strong>
+          <div className="bi-pie-relationship-list">
+            {relationInfo.items.map((item) => (
+              <div key={`${hoveredState.label}-${item.label}`} className="bi-pie-relationship-item">
+                <span>{item.label}</span>
+                <span>{fmtPercent(item.pct)} | {fmtCurrency(item.value)}</span>
+              </div>
+            ))}
+          </div>
+          <button type="button" className="bi-pie-clear-selection" onClick={() => onHoverChange?.(null)}>
+            Limpar seleção
+          </button>
+        </div>
+      ) : (
+        <div className="bi-pie-relationship-card is-empty">
+          Clique em um item para ver a relação entre subelemento e unidade gestora.
+        </div>
+      )}
     </section>
   );
 }
 
-function buildLinePath(points, width, height, maxValue) {
+function buildLinePath(points, width, height, maxValue, paddingX, paddingY) {
   if (points.length === 0) return "";
+  
+  const innerWidth = width - paddingX * 2;
+  const innerHeight = height - paddingY * 2;
+
   if (points.length === 1) {
-    const y = height - (points[0].value / maxValue) * height;
-    return `M 0 ${y} L ${width} ${y}`;
+    const y = paddingY + innerHeight - (points[0].value / maxValue) * innerHeight;
+    return `M ${paddingX} ${y} L ${width - paddingX} ${y}`;
   }
 
   return points
     .map((point, index) => {
-      const x = (index / (points.length - 1)) * width;
-      const y = height - (point.value / maxValue) * height;
+      const x = paddingX + (index / (points.length - 1)) * innerWidth;
+      const y = paddingY + innerHeight - (point.value / maxValue) * innerHeight;
       return `${index === 0 ? "M" : "L"} ${x} ${y}`;
     })
     .join(" ");
@@ -238,217 +415,321 @@ function TopUgTrendLinesPanel({
   selectedPeriodKey,
   onSelectPeriod,
 }) {
-  const minWidth = large ? Math.max(980, periods.length * 78) : 720;
-  const width = minWidth;
-  const height = large ? 360 : 260;
+  // Configuração de dimensões
+  const isMonthlySeries = periods.some((period) => String(period.periodKey).includes("-"));
+  const minWidthPerPeriod = isMonthlySeries ? 72 : large ? 108 : 100;
+  const chartWidth = Math.max(isMonthlySeries ? 820 : 1000, periods.length * minWidthPerPeriod);
+  const chartHeight = 450;
+  
+  const padding = { top: 40, right: 60, bottom: 80, left: 100 };
+  const innerWidth = chartWidth - padding.left - padding.right;
+  const innerHeight = chartHeight - padding.top - padding.bottom;
+  const pointDivisor = Math.max(periods.length - 1, 1);
+
   const [hoveredLine, setHoveredLine] = useState(null);
   const [hoveredPoint, setHoveredPoint] = useState(null);
+  
   const maxValue = Math.max(
     ...series.flatMap((line) => line.points.map((point) => point.value)),
     1
   );
+  
   const axisLabels = getSparseAxisLabels(periods);
+  const activePeriod = hoveredPoint?.periodKey || selectedPeriodKey;
+  const activePeriodLabel = activePeriod
+    ? periods.find((period) => period.periodKey === activePeriod)?.fullLabel || activePeriod
+    : null;
 
-  const activeLine = hoveredLine ? series.find((line) => line.label === hoveredLine) : null;
-  const displayedSeries = useMemo(() => {
-    if (!selectedPeriodKey) return series;
+  const handleMouseEnterLine = (label) => setHoveredLine(label);
+  const handleMouseLeaveLine = () => setHoveredLine(null);
+  const handleTogglePeriod = (periodKey) => {
+    if (!onSelectPeriod) return;
+    onSelectPeriod(selectedPeriodKey === periodKey ? null : periodKey);
+  };
+  const getPointX = (index) => padding.left + (Math.max(index, 0) / pointDivisor) * innerWidth;
 
-    return [...series].sort((a, b) => {
-      const aPoint = a.points.find((point) => point.periodKey === selectedPeriodKey)?.value || 0;
-      const bPoint = b.points.find((point) => point.periodKey === selectedPeriodKey)?.value || 0;
-      return bPoint - aPoint;
-    });
-  }, [selectedPeriodKey, series]);
+  const overview = useMemo(() => {
+    const latestPeriod = periods[periods.length - 1];
+    const focusPeriodKey = activePeriod || latestPeriod?.periodKey || null;
+    const focusPeriod = periods.find((period) => period.periodKey === focusPeriodKey) || latestPeriod || null;
+    const rankedSeries = [...series]
+      .map((line) => {
+        const focusPointIndex = focusPeriodKey ? line.points.findIndex((point) => point.periodKey === focusPeriodKey) : -1;
+        const focusPoint = focusPointIndex >= 0 ? line.points[focusPointIndex] : null;
+        const previousPoint = focusPointIndex > 0 ? line.points[focusPointIndex - 1] : null;
+        const peakPoint = [...line.points].sort((a, b) => b.value - a.value)[0] || null;
+        const delta = previousPoint?.value ? ((focusPoint?.value || 0) - previousPoint.value) / previousPoint.value * 100 : Number.NaN;
+
+        return {
+          ...line,
+          focusValue: focusPoint?.value || 0,
+          delta,
+          peakPoint,
+        };
+      })
+      .sort((a, b) => b.focusValue - a.focusValue);
+
+    return {
+      focusPeriod,
+      latestPeriod,
+      rankedSeries,
+      leader: rankedSeries[0] || null,
+      focusTotal: rankedSeries.reduce((acc, line) => acc + line.focusValue, 0),
+    };
+  }, [activePeriod, periods, series]);
+
+  const tooltipData = hoveredPoint
+    ? {
+        title: hoveredPoint.lineLabel,
+        subtitle: hoveredPoint.fullLabel || activePeriodLabel,
+        value: fmtCurrency(hoveredPoint.value),
+        accent: hoveredPoint.color,
+      }
+    : overview.leader
+      ? {
+          title: overview.leader.label,
+          subtitle: activePeriodLabel || `Último período: ${overview.latestPeriod?.fullLabel || "--"}`,
+          value: fmtCurrency(overview.leader.focusValue),
+          accent: overview.leader.color,
+        }
+      : null;
 
   return (
     <section className="bi-panel">
       <div className="bi-panel-header">
         <h3>{title}</h3>
-        <span>{metricLabel}</span>
+        <span className="bi-panel-subtitle">{metricLabel}</span>
       </div>
 
       {series.length > 0 ? (
-        <div className={`bi-linechart-layout${large ? " is-large" : ""}`}>
-          <div className={`bi-linechart-frame${large ? " is-scrollable" : ""}`}>
-            <svg
-              viewBox={`0 0 ${width} ${height}`}
-              className={`bi-linechart${large ? " is-large" : ""}`}
-              preserveAspectRatio="none"
-              style={large ? { minWidth: `${width}px` } : undefined}
-            >
-              {(large ? periods : axisLabels).map((period, index, list) => {
-                const x = list.length === 1 ? width / 2 : (index / (list.length - 1)) * width;
-
-                return (
-                  <text
-                    key={`top-label-${period.periodKey}`}
-                    x={x}
-                    y="18"
-                    textAnchor="middle"
-                    className="bi-linechart-top-label"
-                  >
-                    {period.fullLabel}
-                  </text>
-                );
-              })}
-
-              {[0.25, 0.5, 0.75, 1].map((step) => (
-                <line
-                  key={step}
-                  x1="0"
-                  x2={width}
-                  y1={height - height * step}
-                  y2={height - height * step}
-                  className="bi-linechart-grid"
-                />
-              ))}
-
-              {periods.map((period, index) => {
-                const x = periods.length === 1 ? width / 2 : (index / (periods.length - 1)) * width;
-
-                return (
-                  <line
-                    key={period.periodKey}
-                    x1={x}
-                    x2={x}
-                    y1="0"
-                    y2={height}
-                    className="bi-linechart-grid bi-linechart-grid-vertical"
-                  />
-                );
-              })}
-
-              {selectedPeriodKey ? (
-                <line
-                  x1={
-                    periods.length === 1
-                      ? width / 2
-                      : (periods.findIndex((period) => period.periodKey === selectedPeriodKey) / (periods.length - 1)) * width
-                  }
-                  x2={
-                    periods.length === 1
-                      ? width / 2
-                      : (periods.findIndex((period) => period.periodKey === selectedPeriodKey) / (periods.length - 1)) * width
-                  }
-                  y1="0"
-                  y2={height}
-                  className="bi-linechart-focus-line"
-                />
-              ) : null}
-
-              {series.map((line) => (
-                <g
-                  key={line.label}
-                  onMouseEnter={() => setHoveredLine(line.label)}
-                  onMouseLeave={() => {
-                    setHoveredLine(null);
-                    setHoveredPoint(null);
-                  }}
-                >
-                  <path
-                    d={buildLinePath(line.points, width, height, maxValue)}
-                    fill="none"
-                    stroke={line.color}
-                    strokeWidth={hoveredLine === line.label ? "5" : "3"}
-                    strokeOpacity={hoveredLine && hoveredLine !== line.label ? "0.2" : "1"}
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                  />
-
-                  {line.points.map((point, index) => {
-                    const x = line.points.length === 1 ? width / 2 : (index / (line.points.length - 1)) * width;
-                    const y = height - (point.value / maxValue) * height;
-
-                    return (
-                      <circle
-                        key={`${line.label}-${point.periodKey}`}
-                        cx={x}
-                        cy={y}
-                        r={hoveredLine === line.label ? 5 : 3}
-                        fill={line.color}
-                        fillOpacity={hoveredLine && hoveredLine !== line.label ? "0.2" : "1"}
-                        onMouseEnter={() =>
-                          setHoveredPoint({
-                            lineLabel: line.label,
-                            color: line.color,
-                            periodKey: point.periodKey,
-                            value: point.value,
-                          })
-                        }
-                        onMouseLeave={() => setHoveredPoint(null)}
-                      />
-                    );
-                  })}
-                </g>
-              ))}
-            </svg>
-
-            <div
-              className={`bi-linechart-axis${large ? " is-large" : ""}`}
-              style={large ? { minWidth: `${width}px` } : undefined}
-            >
-              {(large ? periods : axisLabels).map((period) => (
-                <button
-                  key={period.periodKey}
-                  type="button"
-                  className={`bi-linechart-axis-button${selectedPeriodKey === period.periodKey ? " is-active" : ""}`}
-                  onClick={() => onSelectPeriod(selectedPeriodKey === period.periodKey ? null : period.periodKey)}
-                >
-                  {large ? period.fullLabel : period.shortLabel}
-                </button>
-              ))}
+        <div className="bi-evolution-container">
+          <div className="bi-evolution-summary">
+            <div className="bi-evolution-kpi">
+              <span>Período em foco</span>
+              <strong>{overview.focusPeriod?.fullLabel || "--"}</strong>
+            </div>
+            <div className="bi-evolution-kpi">
+              <span>UG líder</span>
+              <strong>{overview.leader?.label || "--"}</strong>
+            </div>
+            <div className="bi-evolution-kpi">
+              <span>Total das Top 10</span>
+              <strong>{fmtCurrency(overview.focusTotal)}</strong>
             </div>
           </div>
 
-          <div className="bi-linechart-legend">
-            {hoveredPoint ? (
-              <div className="bi-linechart-tooltip">
-                <span className="bi-linechart-swatch" style={{ background: hoveredPoint.color }} />
-                <div>
-                  <strong>{hoveredPoint.lineLabel}</strong>
-                  <span>{hoveredPoint.periodKey}</span>
-                  <span>{fmtCurrency(hoveredPoint.value)}</span>
-                </div>
-              </div>
-            ) : activeLine ? (
-              <div className="bi-linechart-tooltip">
-                <span className="bi-linechart-swatch" style={{ background: activeLine.color }} />
-                <div>
-                  <strong>{activeLine.label}</strong>
-                  <span>Linha destacada no gráfico</span>
-                  <span>{fmtCurrency(activeLine.total)}</span>
-                </div>
-              </div>
-            ) : null}
+          <div className="bi-evolution-toolbar">
+            <div className="bi-evolution-copy">
+              <strong>Selecione um período</strong>
+              <span>Clique nos marcadores do gráfico ou nos chips abaixo para congelar o ranking naquele ponto da série.</span>
+            </div>
+            {selectedPeriodKey && (
+              <button type="button" className="bi-evolution-clear" onClick={() => onSelectPeriod?.(null)}>
+                Limpar foco
+              </button>
+            )}
+          </div>
 
-            {displayedSeries.map((line, index) => {
-              const selectedValue =
-                selectedPeriodKey !== null
-                  ? line.points.find((point) => point.periodKey === selectedPeriodKey)?.value || 0
-                  : null;
-
-              return (
-              <div
-                key={line.label}
-                className={`bi-linechart-legend-item${hoveredLine === line.label ? " is-active" : ""}`}
-                onMouseEnter={() => setHoveredLine(line.label)}
-                onMouseLeave={() => {
-                  setHoveredLine(null);
-                  setHoveredPoint(null);
-                }}
+          <div className="bi-evolution-periods">
+            {axisLabels.map((period) => (
+              <button
+                key={period.periodKey}
+                type="button"
+                className={`bi-evolution-period-pill${selectedPeriodKey === period.periodKey ? " is-active" : ""}`}
+                onClick={() => handleTogglePeriod(period.periodKey)}
               >
-                <span className="bi-linechart-swatch" style={{ background: line.color }} />
-                <div>
-                  <strong>
-                    {index + 1}. {line.label}
-                  </strong>
-                  <span>
-                    {selectedPeriodKey ? `No mês: ${fmtCurrency(selectedValue)}` : fmtCurrency(line.total)}
-                  </span>
-                </div>
+                {period.shortLabel}
+              </button>
+            ))}
+          </div>
+
+          {tooltipData && (
+            <div className="bi-linechart-tooltip">
+              <span className="bi-linechart-tooltip-dot" style={{ background: tooltipData.accent }} />
+              <div>
+                <strong>{tooltipData.title}</strong>
+                <span>{tooltipData.subtitle}</span>
               </div>
-              );
-            })}
+              <strong className="bi-linechart-tooltip-value">{tooltipData.value}</strong>
+            </div>
+          )}
+
+          <div className="bi-evolution-body">
+          <div className="bi-linechart-scroll-container">
+            <div className="bi-linechart-wrapper" style={{ width: `${chartWidth}px` }}>
+              <svg
+                viewBox={`0 0 ${chartWidth} ${chartHeight}`}
+                className="bi-linechart-svg"
+                preserveAspectRatio="xMinYMin meet"
+              >
+                {/* Eixo Y - Grades Horizontais e Valores */}
+                {[0, 0.25, 0.5, 0.75, 1].map((step) => {
+                  const y = padding.top + innerHeight - innerHeight * step;
+                  return (
+                    <g key={step}>
+                      <line
+                        x1={padding.left}
+                        x2={chartWidth - padding.right}
+                        y1={y}
+                        y2={y}
+                        stroke="rgba(148, 163, 184, 0.1)"
+                        strokeWidth="1"
+                      />
+                      <text
+                        x={padding.left - 15}
+                        y={y + 5}
+                        textAnchor="end"
+                        className="bi-chart-axis-text"
+                      >
+                        {fmtCompact(maxValue * step)}
+                      </text>
+                    </g>
+                  );
+                })}
+
+                {/* Eixo X - Guias Verticais e Rótulos */}
+                {periods.map((period, index) => {
+                  const isLabelVisible = axisLabels.some((label) => label.periodKey === period.periodKey);
+                  const x = getPointX(index);
+
+                  return (
+                    <g key={period.periodKey}>
+                      <line
+                        x1={x}
+                        x2={x}
+                        y1={padding.top}
+                        y2={padding.top + innerHeight}
+                        stroke="rgba(148, 163, 184, 0.05)"
+                        strokeWidth="1"
+                      />
+                      {isLabelVisible && (
+                        <text
+                          x={x}
+                          y={chartHeight - 30}
+                          textAnchor="middle"
+                          className="bi-chart-axis-text"
+                          style={{ fontWeight: "600" }}
+                        >
+                          {period.shortLabel}
+                        </text>
+                      )}
+                    </g>
+                  );
+                })}
+
+                {/* Linha de Foco (Hover/Seleção) */}
+                {activePeriod && (
+                  <line
+                    x1={getPointX(periods.findIndex((period) => period.periodKey === activePeriod))}
+                    x2={getPointX(periods.findIndex((period) => period.periodKey === activePeriod))}
+                    y1={padding.top}
+                    y2={padding.top + innerHeight}
+                    stroke="var(--accent-blue)"
+                    strokeWidth="2"
+                    strokeDasharray="4 4"
+                    opacity="0.6"
+                  />
+                )}
+
+                {/* Linhas de Dados */}
+                {series.map((line) => {
+                  const pathD = line.points
+                    .map((point, index) => {
+                      const x = getPointX(index);
+                      const y = padding.top + innerHeight - (point.value / maxValue) * innerHeight;
+                      return `${index === 0 ? "M" : "L"} ${x} ${y}`;
+                    })
+                    .join(" ");
+
+                  const isDimmed = hoveredLine && hoveredLine !== line.label;
+
+                  return (
+                    <g
+                      key={line.label}
+                      onMouseEnter={() => handleMouseEnterLine(line.label)}
+                      onMouseLeave={handleMouseLeaveLine}
+                      className="bi-chart-series-group"
+                    >
+                      <path
+                        d={pathD}
+                        fill="none"
+                        stroke={line.color}
+                        strokeWidth={hoveredLine === line.label ? "6" : "3"}
+                        strokeOpacity={isDimmed ? "0.1" : "1"}
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                        className="bi-chart-path"
+                      />
+                      {line.points.map((point, index) => {
+                        const x = getPointX(index);
+                        const y = padding.top + innerHeight - (point.value / maxValue) * innerHeight;
+                        return (
+                          <circle
+                            key={`${line.label}-${point.periodKey}`}
+                            cx={x}
+                            cy={y}
+                            r={hoveredLine === line.label ? 7 : 4}
+                            fill={line.color}
+                            fillOpacity={isDimmed ? "0.1" : "1"}
+                            onMouseEnter={(e) => {
+                              e.stopPropagation();
+                              setHoveredPoint({
+                                ...point,
+                                lineLabel: line.label,
+                                color: line.color,
+                                fullLabel: periods[index]?.fullLabel || point.periodKey,
+                              });
+                            }}
+                            onMouseLeave={() => setHoveredPoint(null)}
+                            onClick={() => handleTogglePeriod(point.periodKey)}
+                            className="bi-chart-point"
+                          />
+                        );
+                      })}
+                    </g>
+                  );
+                })}
+              </svg>
+            </div>
+          </div>
+
+            <section className="bi-evolution-ug-panel">
+              <div className="bi-evolution-ug-header">
+                <strong>UGs monitoradas</strong>
+                <span>{activePeriod ? `Ranking em ${activePeriodLabel}` : "Último período disponível"}</span>
+              </div>
+
+              <div className="bi-linechart-legend">
+                {overview.rankedSeries.map((line, index) => {
+                  const deltaLabel = Number.isNaN(line.delta)
+                    ? "Sem base anterior"
+                    : `${line.delta >= 0 ? "+" : ""}${line.delta.toFixed(1)}% vs. anterior`;
+                  const peakPeriodLabel = line.peakPoint
+                    ? line.peakPoint.periodKey.includes("-")
+                      ? formatPeriodLabel(line.peakPoint.periodKey)
+                      : line.peakPoint.periodKey
+                    : "--";
+
+                  return (
+                    <div
+                      key={line.label}
+                      className={`bi-linechart-legend-item${hoveredLine === line.label ? " is-active" : ""}`}
+                      onMouseEnter={() => setHoveredLine(line.label)}
+                      onMouseLeave={handleMouseLeaveLine}
+                    >
+                      <span className="bi-linechart-rank">{index + 1}</span>
+                      <span className="bi-linechart-swatch" style={{ background: line.color }} />
+                      <div className="bi-linechart-info">
+                        <strong>{line.label}</strong>
+                        <span>{activePeriod ? `No período: ${fmtCurrency(line.focusValue)}` : `Último período: ${fmtCurrency(line.focusValue)}`}</span>
+                        <span>{deltaLabel}</span>
+                        <span>Pico: {fmtCurrency(line.peakPoint?.value || 0)} em {peakPeriodLabel}</span>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </section>
           </div>
         </div>
       ) : (
@@ -464,7 +745,7 @@ function AnnualBars({ items, metricLabel }) {
   return (
     <section className="bi-panel">
       <div className="bi-panel-header">
-        <h3>Série anual</h3>
+        <h3>Série Anual</h3>
         <span>{metricLabel}</span>
       </div>
 
@@ -508,14 +789,29 @@ function PeriodBars({ items, metricLabel, title, valueKey = "year" }) {
   );
 }
 
-function VariationTable({ rows, title = "Variação anual", periodLabel = "Ano", valueKey = "year" }) {
+function VariationTable({ rows, title = "Variação Anual", periodLabel = "Ano", valueKey = "year", showIPCA = false }) {
   const withVariation = rows.map((current, index) => {
     const previous = rows[index - 1];
     const variation = previous?.value ? ((current.value - previous.value) / previous.value) * 100 : Number.NaN;
+    const ipcaValue =
+      showIPCA && (valueKey === "year" || valueKey === "period")
+        ? IPCA_ANUAL[String(current[valueKey]).substring(0, 4)]
+        : null;
+    const dissonance = ipcaValue !== null && !Number.isNaN(variation) ? variation - ipcaValue : null;
+
+    let dissonanceColor = "";
+    if (dissonance !== null) {
+      if (dissonance <= 0) dissonanceColor = "positive";
+      else if (dissonance <= 2) dissonanceColor = "warning";
+      else dissonanceColor = "negative";
+    }
 
     return {
       ...current,
       variation,
+      ipcaValue,
+      dissonance,
+      dissonanceColor,
     };
   });
 
@@ -527,14 +823,24 @@ function VariationTable({ rows, title = "Variação anual", periodLabel = "Ano",
 
       <div className="bi-table">
         <div className="bi-table-row bi-table-head">
-          <span>{periodLabel}</span>
-          <span>Total</span>
+          <span>{periodLabel} {showIPCA && "| IPCA"}</span>
+          <span>Total {showIPCA && "| Dissonância"}</span>
           <span>Variação</span>
         </div>
         {withVariation.map((row) => (
           <div key={row[valueKey]} className="bi-table-row">
-            <span>{row[valueKey]}</span>
-            <span>{fmtCurrency(row.value)}</span>
+            <div className="bi-table-cell-combined">
+              <span>{row[valueKey]}</span>
+              {showIPCA && <span className="bi-table-subtext">{row.ipcaValue !== null ? `${row.ipcaValue.toFixed(2)}%` : "--"}</span>}
+            </div>
+            <div className="bi-table-cell-combined">
+              <span>{fmtCurrency(row.value)}</span>
+              {showIPCA && (
+                <span className={`bi-table-subtext ${row.dissonanceColor}`}>
+                  {row.dissonance !== null ? `${row.dissonance.toFixed(2)} p.p.` : "--"}
+                </span>
+              )}
+            </div>
             <span className={row.variation >= 0 ? "positive" : "negative"}>{fmtPercent(row.variation)}</span>
           </div>
         ))}
@@ -583,11 +889,11 @@ function MatrixPanel({ title, rows, years, matrixSearch, onMatrixSearch }) {
   );
 }
 
-function InsightCards({ cards }) {
+function InsightCards({ title = "Informações de Destaque", cards }) {
   return (
     <section className="bi-panel">
       <div className="bi-panel-header">
-        <h3>Dicas do painel</h3>
+        <h3>{title}</h3>
       </div>
 
       <div className="bi-insights">
@@ -602,10 +908,18 @@ function InsightCards({ cards }) {
   );
 }
 
-function MonthlySummaryPanel({ title, firstPeriod, lastPeriod, metricLabel }) {
-  const totalVariationValue = (lastPeriod?.value || 0) - (firstPeriod?.value || 0);
-  const totalVariationPercent =
-    firstPeriod?.value ? (totalVariationValue / firstPeriod.value) * 100 : Number.NaN;
+function MonthlySummaryPanel({ title, firstPeriod, lastPeriod, metricLabel, firstLabel, lastLabel, firstValue, lastValue }) {
+  const v1 = firstValue ?? firstPeriod?.value;
+  const v2 = lastValue ?? lastPeriod?.value;
+  const l1 = firstLabel ?? firstPeriod?.label ?? "--";
+  const l2 = lastLabel ?? lastPeriod?.label ?? "--";
+
+  const hasData = v1 !== undefined && v2 !== undefined && v1 !== null && v2 !== null;
+
+  const totalVariationValue = hasData ? v2 - v1 : 0;
+  const totalVariationPercent = hasData && v1 !== 0 ? (totalVariationValue / v1) * 100 : Number.NaN;
+
+  const colorClass = totalVariationValue >= 0 ? "positive" : "negative";
 
   return (
     <section className="bi-panel">
@@ -614,33 +928,27 @@ function MonthlySummaryPanel({ title, firstPeriod, lastPeriod, metricLabel }) {
         <span>{metricLabel}</span>
       </div>
 
-      {firstPeriod && lastPeriod ? (
-        <>
-          <div className="bi-narrative">
-            <p>A comparação abaixo considera somente o valor do primeiro mês e o valor do último mês do período selecionado.</p>
-          </div>
-          <div className="bi-insights">
-          <article>
-            <strong>{firstPeriod.label}</strong>
-            <span>{fmtCurrency(firstPeriod.value)}</span>
-          </article>
-          <article>
-            <strong>{lastPeriod.label}</strong>
-            <span>{fmtCurrency(lastPeriod.value)}</span>
-          </article>
-          <article>
-            <strong>{fmtCurrency(totalVariationValue)}</strong>
-            <span>Variação total em valor</span>
-          </article>
-          <article>
-            <strong>{fmtPercent(totalVariationPercent)}</strong>
-            <span>Variação total em porcentagem</span>
-          </article>
-          </div>
-        </>
-      ) : (
-        <div className="empty-state">Sem meses suficientes para comparar o início e o fim do período.</div>
-      )}
+      <div className="bi-narrative">
+        <p>A comparação abaixo considera somente o valor do primeiro período e o valor do último período do recorte selecionado.</p>
+      </div>
+      <div className="bi-insights">
+        <article>
+          <strong>{l1}</strong>
+          <span>{hasData ? fmtCurrency(v1) : "-"}</span>
+        </article>
+        <article>
+          <strong>{l2}</strong>
+          <span>{hasData ? fmtCurrency(v2) : "-"}</span>
+        </article>
+        <article>
+          <strong className={hasData ? colorClass : ""}>{hasData ? fmtCurrency(totalVariationValue) : "-"}</strong>
+          <span>Variação Total em Valor</span>
+        </article>
+        <article>
+          <strong className={hasData ? colorClass : ""}>{hasData ? fmtPercent(totalVariationPercent) : "-"}</strong>
+          <span>Variação Total em Porcentagem</span>
+        </article>
+      </div>
     </section>
   );
 }
@@ -909,22 +1217,27 @@ function AlertTable({ title, rows, baseLabel, compareLabel, emptyMessage, totalV
 }
 
 export default function CusteioDashboard() {
-  const { user, logout, isAdmin } = useAuth();
+  useAuth();
   const [dataset, setDataset] = useState(null);
   const [lastManualUpdate, setLastManualUpdate] = useState(null);
   const [status, setStatus] = useState("Carregando painel...");
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [refreshInfo, setRefreshInfo] = useState("");
   const [selectedYear, setSelectedYear] = useState("all");
-  const [selectedMetric, setSelectedMetric] = useState("vlliquidado");
+  const [selectedMetric, setSelectedMetric] = useState("vlempenhado");
   const [selectedElementos, setSelectedElementos] = useState([]);
   const [selectedSubelementos, setSelectedSubelementos] = useState([]);
   const [selectedUnidades, setSelectedUnidades] = useState([]);
+  const [selectedSubelementInRanking, setSelectedSubelementInRanking] = useState(null);
+  const [selectedUgInRanking, setSelectedUgInRanking] = useState(null);
   const [selectedPeriodStart, setSelectedPeriodStart] = useState("all");
   const [selectedPeriodEnd, setSelectedPeriodEnd] = useState("all");
   const [selectedRankingPeriod, setSelectedRankingPeriod] = useState(null);
+  const [evolutionType, setEvolutionType] = useState("monthly");
+  const ugQuantity = 10; // Fixed at 10
   const [alertThreshold, setAlertThreshold] = useState(10);
   const [alertGrouping, setAlertGrouping] = useState("subelemento");
+  const [distributionHover, setDistributionHover] = useState(null);
   const [activeTab, setActiveTab] = useState("overview");
   const [globalSearch, setGlobalSearch] = useState("");
   const [appliedSearch, setAppliedSearch] = useState("");
@@ -959,7 +1272,7 @@ export default function CusteioDashboard() {
     try {
       setIsRefreshing(true);
       setRefreshInfo("");
-      setStatus("Atualizando dados do portal...");
+      setStatus("Sincronizando base oficial do portal...");
 
       let syncCompleted = false;
 
@@ -978,7 +1291,7 @@ export default function CusteioDashboard() {
         syncCompleted = false;
       }
 
-      setStatus("Recarregando cache atualizado...");
+      setStatus("Recarregando base oficial sincronizada...");
       const response = await fetch(`${CUSTEIO_DATA_SOURCE.cache.aggregatedJson}?t=${Date.now()}`);
       if (!response.ok) {
         throw new Error(`Falha ao carregar ${CUSTEIO_DATA_SOURCE.cache.aggregatedJson}: ${response.status}`);
@@ -990,11 +1303,11 @@ export default function CusteioDashboard() {
       setStatus("");
       setRefreshInfo(
         syncCompleted
-          ? "Dados oficiais sincronizados e painel recarregado."
-          : "Painel recarregado com o cache publicado disponível."
+          ? "Base oficial sincronizada com o Portal da Transparencia e painel recarregado."
+          : "Painel recarregado com a base oficial publicada disponivel."
       );
     } catch (error) {
-      setStatus(error instanceof Error ? error.message : "Não foi possível atualizar os dados do painel.");
+      setStatus(error instanceof Error ? error.message : "Nao foi possivel sincronizar os dados oficiais do painel.");
     } finally {
       setIsRefreshing(false);
     }
@@ -1159,7 +1472,17 @@ export default function CusteioDashboard() {
     [visibleRecords]
   );
 
-  const currentMetricLabel = METRICS.find((metric) => metric.key === selectedMetric)?.label || "";
+  const currentMetricLabel = useMemo(() => {
+    const metric = METRICS.find((m) => m.key === selectedMetric);
+    return metric?.label || "";
+  }, [selectedMetric]);
+
+  const currentMetricNoun = useMemo(() => {
+    if (selectedMetric === "vlempenhado") return "Empenhamento";
+    if (selectedMetric === "vlliquidado") return "Liquidação";
+    if (selectedMetric === "vlpago") return "Pagamento";
+    return "";
+  }, [selectedMetric]);
 
   const yearlyVisibleTotals = useMemo(
     () =>
@@ -1173,27 +1496,70 @@ export default function CusteioDashboard() {
     [availableYears, selectedMetric, visibleRecords]
   );
 
-  const metricVariation =
-    selectedYear !== "all"
-      ? (() => {
-          const current = yearlyVisibleTotals.find((item) => item.year === Number(selectedYear));
-          const previous = yearlyVisibleTotals.find((item) => item.year === Number(selectedYear) - 1);
-          return previous?.value ? ((current?.value || 0) - previous.value) / previous.value * 100 : Number.NaN;
-        })()
-      : Number.NaN;
+  const years = useMemo(
+    () => yearlyVisibleTotals.filter((item) => item.value > 0).map((item) => item.year),
+    [yearlyVisibleTotals]
+  );
 
   const topUnidades = useMemo(
-    () => aggregateBy(visibleRecords, "unidadeGestoraLabel", selectedMetric, 10),
+    () => aggregateBy(visibleRecords, "unidadeGestoraLabel", selectedMetric, 10, true),
     [visibleRecords, selectedMetric]
   );
   const topSubelementos = useMemo(
-    () => aggregateBy(visibleRecords, "subelementoLabel", selectedMetric, 7),
+    () => aggregateBy(visibleRecords, "subelementoLabel", selectedMetric, 10, true),
     [visibleRecords, selectedMetric]
   );
   const topElementos = useMemo(
-    () => aggregateBy(visibleRecords, "elementoLabel", selectedMetric, 6),
+    () => aggregateBy(visibleRecords, "elementoLabel", selectedMetric, 5000),
     [visibleRecords, selectedMetric]
   );
+  const fullUnidades = useMemo(
+    () => aggregateBy(visibleRecords, "unidadeGestoraLabel", selectedMetric, 5000),
+    [visibleRecords, selectedMetric]
+  );
+  const fullSubelementos = useMemo(
+    () => aggregateBy(visibleRecords, "subelementoLabel", selectedMetric, 5000),
+    [visibleRecords, selectedMetric]
+  );
+
+  const distributionRelations = useMemo(() => {
+    if (activeTab !== "distribution") {
+      return { bySubelemento: new Map(), byUnidade: new Map() };
+    }
+
+    return {
+      bySubelemento: buildDistributionRelations(
+        visibleRecords,
+        "subelementoLabel",
+        "unidadeGestoraLabel",
+        selectedMetric
+      ),
+      byUnidade: buildDistributionRelations(
+        visibleRecords,
+        "unidadeGestoraLabel",
+        "subelementoLabel",
+        selectedMetric
+      ),
+    };
+  }, [activeTab, selectedMetric, visibleRecords]);
+
+  const rankingSubelementos = useMemo(() => {
+    if (activeTab !== "trends") return [];
+    let recs = visibleRecords;
+    if (selectedUgInRanking) {
+      recs = recs.filter((r) => r.unidadeGestoraLabel === selectedUgInRanking);
+    }
+    return aggregateBy(recs, "subelementoLabel", selectedMetric, 5000);
+  }, [activeTab, selectedMetric, selectedUgInRanking, visibleRecords]);
+
+  const rankingUnidades = useMemo(() => {
+    if (activeTab !== "trends") return [];
+    let recs = visibleRecords;
+    if (selectedSubelementInRanking) {
+      recs = recs.filter((r) => r.subelementoLabel === selectedSubelementInRanking);
+    }
+    return aggregateBy(recs, "unidadeGestoraLabel", selectedMetric, 5000);
+  }, [activeTab, selectedMetric, selectedSubelementInRanking, visibleRecords]);
 
   const monthlyVisibleTotals = useMemo(() => {
     if (!["monthly", "trends", "ugRanking"].includes(activeTab)) return [];
@@ -1229,45 +1595,62 @@ export default function CusteioDashboard() {
       return { periods: [], series: [] };
     }
 
-    if (topUnidades.length === 0 || monthlyVisibleTotals.length === 0) {
+    if (topUnidades.length === 0) {
       return { periods: [], series: [] };
     }
 
-    const periods = monthlyVisibleTotals.map((item) => ({
-      periodKey: item.periodKey,
-      shortLabel: formatPeriodLabel(item.periodKey),
-      fullLabel: formatPeriodLabel(item.periodKey),
-    }));
+    let periods = [];
+    if (evolutionType === "monthly") {
+      periods = monthlyVisibleTotals.map((item) => ({
+        periodKey: item.periodKey,
+        shortLabel: formatPeriodLabel(item.periodKey),
+        fullLabel: formatPeriodLabel(item.periodKey),
+      }));
+    } else {
+      periods = years.map((year) => ({
+        periodKey: String(year),
+        shortLabel: String(year),
+        fullLabel: String(year),
+      }));
+    }
+
+    if (periods.length === 0) return { periods: [], series: [] };
 
     const colors = ["#38BDF8", "#10B981", "#F59E0B", "#F97316", "#A78BFA", "#FB7185", "#22C55E", "#EAB308", "#60A5FA", "#F472B6"];
 
     const periodValueMap = new Map();
 
     visibleRecords.forEach((record) => {
-      if (!topUnidades.some((unit) => unit.label === record.unidadeGestoraLabel)) {
+      if (!topUnidades.slice(0, ugQuantity).some((unit) => unit.label === record.unidadeGestoraLabel)) {
         return;
       }
 
-      const mapKey = `${record.unidadeGestoraLabel}::${record.periodKey}`;
+      const periodKey = evolutionType === "monthly" ? record.periodKey : String(record.year);
+      const mapKey = `${record.unidadeGestoraLabel}::${periodKey}`;
       periodValueMap.set(mapKey, (periodValueMap.get(mapKey) || 0) + record[selectedMetric]);
     });
 
-    const series = topUnidades.map((unit, index) => {
+    const series = topUnidades.slice(0, ugQuantity).map((unit, index) => {
       const points = periods.map((period) => ({
         periodKey: period.periodKey,
         value: periodValueMap.get(`${unit.label}::${period.periodKey}`) || 0,
       }));
+
+      // Top 5 subelements for this UG in the overall selected period
+      const ugRecords = visibleRecords.filter((r) => r.unidadeGestoraLabel === unit.label);
+      const topSubelements = aggregateBy(ugRecords, "subelementoLabel", selectedMetric, 5);
 
       return {
         label: unit.label,
         total: unit.value,
         color: colors[index % colors.length],
         points,
+        topSubelements,
       };
     });
 
     return { periods, series };
-  }, [activeTab, monthlyVisibleTotals, selectedMetric, topUnidades, visibleRecords]);
+  }, [activeTab, monthlyVisibleTotals, selectedMetric, topUnidades, visibleRecords, ugQuantity, evolutionType, years]);
 
   const monthlyRangeSummary = useMemo(() => {
     if (monthlyVariationRows.length === 0) {
@@ -1279,6 +1662,35 @@ export default function CusteioDashboard() {
       lastPeriod: monthlyVariationRows[monthlyVariationRows.length - 1],
     };
   }, [monthlyVariationRows]);
+
+  const annualRangeSummary = useMemo(() => {
+    if (visibleRecords.length === 0) return null;
+
+    const currentYears = [...new Set(visibleRecords.map((r) => r.year))].sort();
+    if (currentYears.length < 2) return null;
+
+    const firstYear = currentYears[0];
+    const lastYear = currentYears[currentYears.length - 1];
+
+    // Get exact range from visible records to ensure we compare first vs last year of selection
+    const firstYearTotal = visibleRecords
+      .filter((r) => r.year === firstYear)
+      .reduce((acc, r) => acc + r[selectedMetric], 0);
+
+    const lastYearTotal = visibleRecords
+      .filter((r) => r.year === lastYear)
+      .reduce((acc, r) => acc + r[selectedMetric], 0);
+
+    const firstYearLabel = `Total de ${firstYear} (no período)`;
+    const lastYearLabel = `Total de ${lastYear} (no período)`;
+
+    return {
+      firstLabel: firstYearLabel,
+      lastLabel: lastYearLabel,
+      firstValue: firstYearTotal,
+      lastValue: lastYearTotal,
+    };
+  }, [selectedMetric, visibleRecords]);
 
   const effectiveAlertStartPeriod = selectedPeriodStart === "all" ? visiblePeriods[0]?.periodKey || null : selectedPeriodStart;
   const effectiveAlertEndPeriod =
@@ -1338,42 +1750,130 @@ export default function CusteioDashboard() {
     ];
   }, [alertThreshold, effectiveAlertEndPeriod, effectiveAlertStartPeriod, historicalAlertRows, periodComparisonRows]);
 
-  const years = yearlyVisibleTotals.map((item) => item.year);
+  const selectedYears = useMemo(() => {
+    if (selectedYear !== "all") return [Number(selectedYear)];
+    return years;
+  }, [selectedYear, years]);
+
   const matrixBySubelemento = useMemo(
     () =>
       activeTab === "matrix"
-        ? buildMatrixRows(visibleRecords, "subelementoLabel", selectedMetric, years, 12, deferredMatrixSearch)
+        ? buildMatrixRows(
+            visibleRecords,
+            "subelementoLabel",
+            selectedMetric,
+            selectedYears,
+            5000,
+            deferredMatrixSearch,
+            selectedSubelementos.length > 0 ? selectedSubelementos : null,
+            "subelementoCode"
+          )
         : [],
-    [activeTab, deferredMatrixSearch, selectedMetric, visibleRecords, years]
+    [activeTab, deferredMatrixSearch, selectedMetric, visibleRecords, selectedYears, selectedSubelementos]
   );
   const matrixByUnidade = useMemo(
     () =>
       activeTab === "matrix"
-        ? buildMatrixRows(visibleRecords, "unidadeGestoraLabel", selectedMetric, years, 12, deferredMatrixSearch)
+        ? buildMatrixRows(
+            visibleRecords,
+            "unidadeGestoraLabel",
+            selectedMetric,
+            selectedYears,
+            5000,
+            deferredMatrixSearch,
+            selectedUnidades.length > 0 ? selectedUnidades : null,
+            "unidadeGestoraCode"
+          )
         : [],
-    [activeTab, deferredMatrixSearch, selectedMetric, visibleRecords, years]
+    [activeTab, deferredMatrixSearch, selectedMetric, visibleRecords, selectedYears, selectedUnidades]
   );
 
-  const insightCards = useMemo(() => {
+  const annualHighlights = useMemo(() => {
     const accumulated = yearlyVisibleTotals.reduce((acc, item) => acc + item.value, 0);
     const bestYear = [...yearlyVisibleTotals].sort((a, b) => b.value - a.value)[0];
 
     return [
-      { label: "Ultimo ano disponivel no recorte", value: String(yearlyVisibleTotals.at(-1)?.year || "--") },
-      { label: "Ano de maior valor na seleção atual", value: bestYear ? `${bestYear.year}` : "--" },
-      { label: "Total acumulado da métrica selecionada", value: fmtCompact(accumulated) },
-      { label: "UG líder na seleção atual", value: topUnidades[0]?.label || "--" },
-      { label: "Subelemento dominante", value: topSubelementos[0]?.label || "--" },
-      { label: "Elemento dominante", value: topElementos[0]?.label || "--" },
+      { label: "Ano de Maior Valor na Seleção", value: bestYear ? `${bestYear.year}` : "--" },
+      { label: `Total da ${currentMetricLabel}`, value: fmtCurrency(accumulated) },
+      { label: "UG Líder", value: topUnidades[0]?.label || "--" },
+      { label: "Subelemento Dominante", value: topSubelementos[0]?.label || "--" },
+      { label: "Elemento Dominante", value: topElementos[0]?.label || "--" },
     ];
-  }, [topElementos, topSubelementos, topUnidades, yearlyVisibleTotals]);
+  }, [topElementos, topSubelementos, topUnidades, yearlyVisibleTotals, currentMetricLabel]);
+
+  const monthlyHighlightsMaxMonth = useMemo(() => {
+    if (monthlyVariationRows.length === 0) return [];
+
+    const sortedByValue = [...monthlyVariationRows].sort((a, b) => b.value - a.value);
+    const topMonth = sortedByValue[0];
+    if (!topMonth) return [];
+
+    const getTopForMonth = (periodKey) => {
+      const recs = visibleRecords.filter((r) => r.periodKey === periodKey);
+      const units = aggregateBy(recs, "unidadeGestoraLabel", selectedMetric, 1);
+      const subs = aggregateBy(recs, "subelementoLabel", selectedMetric, 1);
+      const elems = aggregateBy(recs, "elementoLabel", selectedMetric, 1);
+      const total = recs.reduce((acc, r) => acc + r[selectedMetric], 0);
+      return { unit: units[0]?.label || "--", sub: subs[0]?.label || "--", elem: elems[0]?.label || "--", total };
+    };
+
+    const topMonthDetails = getTopForMonth(topMonth.period);
+
+    return [
+      { label: "Mês de Maior Gasto na Seleção", value: formatPeriodLabel(topMonth.period) },
+      { label: "Total no Mês de Maior Gasto", value: fmtCurrency(topMonthDetails.total) },
+      { label: "UG Líder no Mês", value: topMonthDetails.unit },
+      { label: "Subelemento Dominante no Mês", value: topMonthDetails.sub },
+      { label: "Elemento Dominante no Mês", value: topMonthDetails.elem },
+    ];
+  }, [monthlyVariationRows, selectedMetric, visibleRecords]);
+
+  const monthlyHighlightsMaxVariation = useMemo(() => {
+    if (monthlyVariationRows.length === 0) return [];
+
+    // Calculate variations between months
+    const withVariation = monthlyVariationRows.map((current, index) => {
+      const previous = monthlyVariationRows[index - 1];
+      const delta = previous?.value ? current.value - previous.value : 0;
+      const pct = previous?.value ? (delta / previous.value) * 100 : 0;
+      return { ...current, delta, pct, prevLabel: previous?.label || "--" };
+    });
+    
+    // Sort by absolute variation to find the most significant change
+    const sortedByVariation = [...withVariation].sort((a, b) => Math.abs(b.pct) - Math.abs(a.pct));
+    const topVarMonth = sortedByVariation[0];
+    if (!topVarMonth) return [];
+
+    const getTopForMonth = (periodKey) => {
+      const recs = visibleRecords.filter((r) => r.periodKey === periodKey);
+      const units = aggregateBy(recs, "unidadeGestoraLabel", selectedMetric, 1);
+      const subs = aggregateBy(recs, "subelementoLabel", selectedMetric, 1);
+      const elems = aggregateBy(recs, "elementoLabel", selectedMetric, 1);
+      return { unit: units[0]?.label || "--", sub: subs[0]?.label || "--", elem: elems[0]?.label || "--" };
+    };
+
+    const topVarDetails = getTopForMonth(topVarMonth.period);
+
+    return [
+      {
+        label: "Maior Variação",
+        value: `${topVarMonth.prevLabel} → ${formatPeriodLabel(topVarMonth.period)}`,
+      },
+      { label: "Variação em Valor", value: fmtCurrency(topVarMonth.delta) },
+      { label: "Variação em Percentual", value: fmtPercent(topVarMonth.pct) },
+      { label: "UG Líder na Variação", value: topVarDetails.unit },
+      { label: "Subelemento na Variação", value: topVarDetails.sub },
+    ];
+  }, [monthlyVariationRows, selectedMetric, visibleRecords]);
 
   const clearFilters = () => {
     setSelectedYear("all");
-    setSelectedMetric("vlliquidado");
+    setSelectedMetric("vlempenhado");
     setSelectedElementos([]);
     setSelectedSubelementos([]);
     setSelectedUnidades([]);
+    setSelectedSubelementInRanking(null);
+    setSelectedUgInRanking(null);
     setSelectedPeriodStart("all");
     setSelectedPeriodEnd("all");
     setSelectedRankingPeriod(null);
@@ -1421,403 +1921,404 @@ export default function CusteioDashboard() {
 
   return (
     <div className="bi-dashboard">
-      <div className="bi-topbar">
-        <div className="bi-topbar-actions">
-          <Link to="/" className="bi-home-button">
-            Home
-          </Link>
-          <Link to="/monitoramento" className="bi-home-button">
-            Monitoramento
-          </Link>
-          {isAdmin ? (
-            <Link to="/admin" className="bi-home-button">
-              Admin
-            </Link>
-          ) : null}
-          <span className="header-status">{user?.email}</span>
-          <NotificationBell />
-          <ThemeToggle />
-          <button type="button" className="bi-refresh-button" onClick={logout}>
-            Sair
-          </button>
-        </div>
+      <TopBar title="Monitoramento do Custeio">
         <div className="bi-refresh-stack">
           <button type="button" className="bi-refresh-button" onClick={refreshDashboard} disabled={isRefreshing}>
-            {isRefreshing ? "Atualizando..." : "Atualizar Dados"}
+            {isRefreshing ? "Sincronizando..." : "Sincronizar com Portal"}
           </button>
           <span className="bi-topbar-status">Última atualização: {updatedAtLabel}</span>
           {refreshInfo ? <span className="bi-topbar-status">{refreshInfo}</span> : null}
         </div>
-      </div>
+      </TopBar>
 
       <section className="bi-hero">
-        <div>
-          <span className="section-kicker">Fonte oficial do portal</span>
-          <h1>Análise das Despesas de Custeio</h1>
+        <div className="bi-hero-content">
+          <h1>Monitoramento do Custeio</h1>
           <p>
-            Painel alimentado pelos ZIPs mensais oficiais do Portal da Transparência de Santa Catarina, com filtros
-            acumulados, seleção múltipla de subelementos e leitura mensal período a período.
+            Dados da execução orçamentária do grupo de natureza de despesa “Outras Despesas Correntes” (empenhamento, liquidação e pagamento).
           </p>
         </div>
 
-        <div className="bi-filters bi-filters-grid">
-          <div className="bi-filter-group bi-filter-group-wide">
-            <label htmlFor="global-search">Pesquisa</label>
-            <div className="bi-search-container">
-              <input
-                id="global-search"
-                className="bi-search-input"
-                placeholder="Escreva para pesquisar nos outros filtros..."
-                value={globalSearch}
-                onChange={(e) => setGlobalSearch(e.target.value)}
-                onKeyDown={handleSearchKeyDown}
+        <div className="bi-filters-container">
+          <div className="bi-filters-grid">
+            <div className="bi-filter-group bi-filter-group-wide">
+              <label htmlFor="global-search">Pesquisa Global</label>
+              <div className="bi-search-container">
+                <input
+                  id="global-search"
+                  className="bi-search-input"
+                  placeholder="Pesquisar em todos os filtros..."
+                  value={globalSearch}
+                  onChange={(e) => setGlobalSearch(e.target.value)}
+                  onKeyDown={handleSearchKeyDown}
+                />
+                <button
+                  type="button"
+                  className="bi-search-button"
+                  onClick={() => handleSearch()}
+                  aria-label="Pesquisar"
+                >
+                  🔍
+                </button>
+              </div>
+            </div>
+
+            <div className="bi-filter-group bi-filter-group-wide">
+              <label htmlFor="metric-select">Fase da Despesa</label>
+              <select id="metric-select" value={selectedMetric} onChange={(e) => setSelectedMetric(e.target.value)}>
+                {METRICS.map((metric) => (
+                  <option key={metric.key} value={metric.key}>
+                    {metric.label}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            <div className="bi-filter-group">
+              <label htmlFor="period-start">Período Inicial</label>
+              <select id="period-start" value={selectedPeriodStart} onChange={(e) => setSelectedPeriodStart(e.target.value)}>
+                <option value="all">Desde o Início</option>
+                {periodOptions.map((option) => (
+                  <option key={option.value} value={option.value}>
+                    {option.label}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            <div className="bi-filter-group">
+              <label htmlFor="period-end">Período Final</label>
+              <select id="period-end" value={selectedPeriodEnd} onChange={(e) => setSelectedPeriodEnd(e.target.value)}>
+                <option value="all">Até o Fim</option>
+                {periodOptions.map((option) => (
+                  <option key={option.value} value={option.value}>
+                    {option.label}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            <div className="bi-filter-group bi-filter-group-wide">
+              <MultiSelectChecklist
+                label="Elementos"
+                placeholder="Buscar código ou nome..."
+                options={dimensionOptions.elementos}
+                selectedValues={selectedElementos}
+                searchValue={elementoSearch}
+                onSearchChange={setElementoSearch}
+                onToggleValue={toggleElemento}
+                onClear={() => setSelectedElementos([])}
               />
+            </div>
+
+            <div className="bi-filter-group bi-filter-group-wide">
+              <MultiSelectChecklist
+                label="Subelementos"
+                placeholder="Buscar código ou nome..."
+                options={dimensionOptions.subelementos}
+                selectedValues={selectedSubelementos}
+                searchValue={subelementoSearch}
+                onSearchChange={setSubelementoSearch}
+                onToggleValue={toggleSubelemento}
+                onClear={() => setSelectedSubelementos([])}
+              />
+            </div>
+
+            <div className="bi-filter-group bi-filter-group-wide">
+              <MultiSelectChecklist
+                label="Unidades Gestoras"
+                placeholder="Buscar código ou nome..."
+                options={dimensionOptions.unidades}
+                selectedValues={selectedUnidades}
+                searchValue={unidadeSearch}
+                onSearchChange={setUnidadeSearch}
+                onToggleValue={toggleUnidade}
+                onClear={() => setSelectedUnidades([])}
+              />
+            </div>
+
+            <div className="bi-filter-group bi-filter-group-wide">
               <button
                 type="button"
-                className="bi-search-button"
-                onClick={() => handleSearch()}
-                aria-label="Pesquisar"
+                className="bi-clear-button"
+                onClick={clearFilters}
+                style={{ width: "100%", height: "48px", marginTop: "12px" }}
               >
-                🔍
+                Limpar Filtros
               </button>
             </div>
-          </div>
-
-          <div className="bi-filter-group">
-            <label htmlFor="metric-select">Métrica</label>
-            <select id="metric-select" value={selectedMetric} onChange={(e) => setSelectedMetric(e.target.value)}>
-              {METRICS.map((metric) => (
-                <option key={metric.key} value={metric.key}>
-                  {metric.label}
-                </option>
-              ))}
-            </select>
-          </div>
-
-          <div className="bi-filter-group">
-            <label htmlFor="year-select">Ano</label>
-            <select id="year-select" value={selectedYear} onChange={(e) => setSelectedYear(e.target.value)}>
-              <option value="all">Todos os anos</option>
-              {availableYears.map((year) => (
-                <option key={year} value={year}>
-                  {year}
-                </option>
-              ))}
-            </select>
-          </div>
-
-          <div className="bi-filter-group">
-            <label htmlFor="period-start">Período inicial</label>
-            <select id="period-start" value={selectedPeriodStart} onChange={(e) => setSelectedPeriodStart(e.target.value)}>
-              <option value="all">Desde o início</option>
-              {periodOptions.map((option) => (
-                <option key={option.value} value={option.value}>
-                  {option.label}
-                </option>
-              ))}
-            </select>
-          </div>
-
-          <div className="bi-filter-group">
-            <label htmlFor="period-end">Período final</label>
-            <select id="period-end" value={selectedPeriodEnd} onChange={(e) => setSelectedPeriodEnd(e.target.value)}>
-              <option value="all">Até o fim</option>
-              {periodOptions.map((option) => (
-                <option key={option.value} value={option.value}>
-                  {option.label}
-                </option>
-              ))}
-            </select>
-          </div>
-
-          <MultiSelectChecklist
-            label="Elementos"
-            placeholder="Buscar código ou nome..."
-            options={dimensionOptions.elementos}
-            selectedValues={selectedElementos}
-            searchValue={elementoSearch}
-            onSearchChange={setElementoSearch}
-            onToggleValue={toggleElemento}
-            onClear={() => setSelectedElementos([])}
-          />
-
-          <MultiSelectChecklist
-            label="Subelementos"
-            placeholder="Buscar código ou nome..."
-            options={dimensionOptions.subelementos}
-            selectedValues={selectedSubelementos}
-            searchValue={subelementoSearch}
-            onSearchChange={setSubelementoSearch}
-            onToggleValue={toggleSubelemento}
-            onClear={() => setSelectedSubelementos([])}
-          />
-
-          <MultiSelectChecklist
-            label="Unidades Gestoras"
-            placeholder="Buscar código ou nome..."
-            options={dimensionOptions.unidades}
-            selectedValues={selectedUnidades}
-            searchValue={unidadeSearch}
-            onSearchChange={setUnidadeSearch}
-            onToggleValue={toggleUnidade}
-            onClear={() => setSelectedUnidades([])}
-            className="bi-filter-group-wide"
-          />
-
-          <div className="bi-filter-actions">
-            <button type="button" className="bi-clear-button" onClick={clearFilters}>
-              Limpar filtros
-            </button>
           </div>
         </div>
       </section>
 
-      <section className="bi-tabs">
-        {PAGE_TABS.map((tab) => (
-          <button
-            key={tab.key}
-            type="button"
-            className={`bi-tab${activeTab === tab.key ? " active" : ""}`}
-            onClick={() => setActiveTab(tab.key)}
-          >
-            {tab.label}
-          </button>
-        ))}
-      </section>
-
-      <section className="bi-metric-grid">
-        <MetricCard
-          label="Empenhado total"
-          value={totalMetrics.vlempenhado}
-          secondary={
-            selectedPeriodStart === "all" && selectedPeriodEnd === "all"
-              ? "Somatório do período filtrado"
-              : `Período ${selectedPeriodStart === "all" ? periodOptions[0]?.value || "--" : selectedPeriodStart} até ${
-                  selectedPeriodEnd === "all" ? periodOptions.at(-1)?.value || "--" : selectedPeriodEnd
-                }`
-          }
-        />
-        <MetricCard
-          label="Liquidado total"
-          value={totalMetrics.vlliquidado}
-          secondary={selectedYear === "all" ? "Base principal do relatório" : `Variação anual: ${fmtPercent(metricVariation)}`}
-        />
-        <MetricCard
-          label="Pago total"
-          value={totalMetrics.vlpago}
-          secondary={`Registros analisados: ${visibleRecords.length.toLocaleString("pt-BR")}`}
-        />
-      </section>
-
-      {activeTab === "overview" && (
-        <>
-          <section className="bi-grid bi-grid-main">
-            <AnnualBars items={yearlyVisibleTotals} metricLabel={currentMetricLabel} />
-            <VariationTable rows={yearlyVisibleTotals} />
-          </section>
-          <section className="bi-grid">
-            <TopRankingPanel title={`Ranking das 10 UGs com maior ${currentMetricLabel.toLowerCase()}`} items={topUnidades} />
-            <BarList title={`Elementos com maior ${currentMetricLabel.toLowerCase()}`} items={topElementos} />
-          </section>
-        </>
-      )}
-
-      {activeTab === "monthly" && (
-        <>
-          <section className="bi-grid bi-grid-main">
-            <PeriodBars items={monthlyVariationRows} metricLabel={currentMetricLabel} title="Série mensal" valueKey="period" />
-            <VariationTable
-              rows={monthlyVariationRows}
-              title="Variação mensal"
-              periodLabel="Mês"
-              valueKey="period"
-            />
-          </section>
-          <section className="bi-grid">
-            <MonthlySummaryPanel
-              title="Comparativo do período selecionado"
-              firstPeriod={monthlyRangeSummary.firstPeriod}
-              lastPeriod={monthlyRangeSummary.lastPeriod}
-              metricLabel={currentMetricLabel}
-            />
-          </section>
-        </>
-      )}
-
-      {activeTab === "distribution" && (
-        <section className="bi-grid">
-          <PiePanel title={`${currentMetricLabel} por subelemento`} items={topSubelementos} />
-          <PiePanel title={`${currentMetricLabel} por unidade gestora`} items={topUnidades} />
+      <div className="bi-dashboard-content">
+        <section className="bi-tabs">
+          {PAGE_TABS.map((tab) => (
+            <button
+              key={tab.key}
+              type="button"
+              className={`bi-tab${activeTab === tab.key ? " active" : ""}`}
+              onClick={() => setActiveTab(tab.key)}
+            >
+              {tab.label}
+            </button>
+          ))}
         </section>
-      )}
 
-      {activeTab === "trends" && (
-        <>
-          <section className="bi-grid">
-            <BarList title={`Subelementos com maior ${currentMetricLabel.toLowerCase()}`} items={topSubelementos} />
-            <BarList title={`Unidades gestoras com maior ${currentMetricLabel.toLowerCase()}`} items={topUnidades} />
-          </section>
-          <section className="bi-grid">
-            <section className="bi-panel">
-              <div className="bi-panel-header">
-                <h3>Série mensal</h3>
-                <span>{monthlyVisibleTotals.length > 0 ? "Período a período" : "Sem registros mensais"}</span>
-              </div>
-              {monthlyVisibleTotals.length > 0 ? (
-                <div className="bi-monthly-list">
-                  {monthlyVisibleTotals.map((item) => (
-                    <div key={item.periodKey} className="bi-monthly-item">
-                      <strong>{item.label}</strong>
-                      <span>{fmtCurrency(item.value)}</span>
-                    </div>
-                  ))}
-                </div>
-              ) : (
-                <div className="empty-state">Sem registros mensais para os filtros selecionados.</div>
-              )}
-            </section>
-            <section className="bi-panel">
-              <div className="bi-panel-header">
-                <h3>Estrutura oficial</h3>
-              </div>
-              <div className="bi-narrative">
-                <p>Campos obrigatorios esperados no cache: {CUSTEIO_DATA_CONTRACT.requiredFields.join(", ")}</p>
-                <p>Os valores exibidos saem dos ZIPs mensais oficiais publicados no Portal da Transparência.</p>
-                <p>O período pode ser filtrado de 2021 até 2026 conforme a disponibilidade atual do portal.</p>
-              </div>
-            </section>
-          </section>
-        </>
-      )}
-
-      {activeTab === "matrix" && (
-        <section className="bi-grid">
-          <MatrixPanel
-            title="Valores por subelemento e ano"
-            rows={matrixBySubelemento}
-            years={years}
-            matrixSearch={matrixSearch}
-            onMatrixSearch={setMatrixSearch}
+        <section className="bi-metric-grid">
+          <MetricCard
+            label="Empenhamento"
+            value={totalMetrics.vlempenhado}
           />
-          <MatrixPanel
-            title="Valores por unidade gestora e ano"
-            rows={matrixByUnidade}
-            years={years}
-            matrixSearch={matrixSearch}
-            onMatrixSearch={setMatrixSearch}
+          <MetricCard
+            label="Liquidação"
+            value={totalMetrics.vlliquidado}
+          />
+          <MetricCard
+            label="Pagamento"
+            value={totalMetrics.vlpago}
           />
         </section>
-      )}
 
-      {activeTab === "insights" && (
-        <section className="bi-grid">
-          <InsightCards cards={insightCards} />
-          <TopRankingPanel title={`Ranking das 10 UGs no período selecionado`} items={topUnidades} />
-        </section>
-      )}
-
-      {activeTab === "ugRanking" && (
-        <section className="bi-grid bi-grid-single">
-          <TopUgTrendLinesPanel
-            title="Evolução mensal das 10 UGs que mais gastaram"
-            periods={topUgTrendSeries.periods}
-            series={topUgTrendSeries.series}
-            metricLabel={currentMetricLabel}
-            large
-            selectedPeriodKey={selectedRankingPeriod}
-            onSelectPeriod={setSelectedRankingPeriod}
-          />
-        </section>
-      )}
-
-      {activeTab === "alerts" && (
-        <>
-          <section className="bi-grid">
-            <section className="bi-panel">
-              <div className="bi-panel-header">
-                <h3>Monitoramento contínuo</h3>
-                <span>Leitura incremental sobre a base oficial</span>
-              </div>
-
-              <div className="bi-alert-controls">
-                <div className="bi-filter-group">
-                  <label htmlFor="alert-grouping">Agrupamento da leitura</label>
-                  <select id="alert-grouping" value={alertGrouping} onChange={(e) => setAlertGrouping(e.target.value)}>
-                    <option value="subelemento">Subelemento</option>
-                    <option value="unidade">Unidade gestora</option>
-                    <option value="elemento">Elemento</option>
-                  </select>
-                </div>
-
-                <div className="bi-filter-group">
-                  <label htmlFor="alert-threshold">Limite de alerta (%)</label>
-                  <input
-                    id="alert-threshold"
-                    type="number"
-                    min="0"
-                    step="1"
-                    className="bi-search-input"
-                    value={alertThreshold}
-                    onChange={(e) => setAlertThreshold(Math.max(0, Number(e.target.value) || 0))}
-                  />
-                </div>
-              </div>
-
-              <div className="bi-narrative">
-                <p>
-                  Esta trilha compara o primeiro e o último período do recorte atual e também verifica se o último
-                  período ficou acima da média dos 12 meses anteriores.
-                </p>
-                <p>
-                  Sugestão de leitura: 10% para alertas mensais e 50% para leituras anuais. O ajuste aqui afeta somente
-                  esta aba.
-                </p>
-              </div>
+        {activeTab === "overview" && (
+          <>
+            <section className="bi-grid bi-grid-main">
+              <AnnualBars items={yearlyVisibleTotals} metricLabel={currentMetricLabel} />
+              <VariationTable rows={yearlyVisibleTotals} showIPCA />
             </section>
+            <section className="bi-grid">
+              <TopRankingPanel title={`10 UGs com Maior Valor ${currentMetricLabel}`} items={topUnidades} />
+              <TopRankingPanel title={`10 Subelementos com Maior Valor ${currentMetricLabel}`} items={topSubelementos} />
+            </section>
+            <section className="bi-grid">
+              <MonthlySummaryPanel
+                title="Comparativo do Período Selecionado"
+                firstLabel={annualRangeSummary?.firstLabel}
+                lastLabel={annualRangeSummary?.lastLabel}
+                firstValue={annualRangeSummary?.firstValue}
+                lastValue={annualRangeSummary?.lastValue}
+                metricLabel={currentMetricLabel}
+              />
+            </section>
+            <section className="bi-grid">
+              <InsightCards cards={annualHighlights} />
+            </section>
+          </>
+        )}
 
-            <InsightCards cards={alertInsightCards} />
-          </section>
+        {activeTab === "monthly" && (
+          <>
+            <section className="bi-grid bi-grid-main">
+              <PeriodBars items={monthlyVariationRows} metricLabel={currentMetricLabel} title="Série mensal" valueKey="period" />
+              <VariationTable
+                rows={monthlyVariationRows}
+                title="Variação mensal"
+                periodLabel="Mês"
+                valueKey="period"
+                showIPCA
+              />
+            </section>
+            <section className="bi-grid">
+              <MonthlySummaryPanel
+                title="Comparativo do Período Selecionado"
+                firstPeriod={monthlyRangeSummary.firstPeriod}
+                lastPeriod={monthlyRangeSummary.lastPeriod}
+                metricLabel={currentMetricLabel}
+              />
+            </section>
+            <section className="bi-grid">
+              <InsightCards title="Mês de Maior Gasto" cards={monthlyHighlightsMaxMonth} />
+              <InsightCards title="Maior Variação" cards={monthlyHighlightsMaxVariation} />
+            </section>
+          </>
+        )}
 
-          <section className="bi-grid bi-grid-single">
-            <AlertTable
-              title="Variações acima do limite entre o início e o fim do recorte"
-              rows={periodComparisonRows.slice(0, 12)}
-              baseLabel={effectiveAlertStartPeriod || "Início"}
-              compareLabel={effectiveAlertEndPeriod || "Fim"}
-              emptyMessage="Selecione um intervalo com ao menos dois períodos para montar os alertas de comparação."
-              totalValue={periodEndTotal}
+        {activeTab === "distribution" && (
+          <section className="bi-grid">
+            <PiePanel
+              title={`${currentMetricNoun} por Subelemento`}
+              items={topSubelementos}
+              panelKey="subelemento"
+              hoveredState={distributionHover}
+              onHoverChange={setDistributionHover}
+              othersItems={fullSubelementos.slice(10)}
+              relationInfo={
+                distributionHover
+                  ? distributionHover.source === "subelemento"
+                    ? distributionRelations.bySubelemento.get(distributionHover.label)
+                    : distributionRelations.byUnidade.get(distributionHover.label)
+                  : null
+              }
+              relationTargetLabel={
+                distributionHover?.source === "unidade" ? "Subelementos relacionados" : "UGs relacionadas"
+              }
             />
-            <AlertTable
-              title="Desvios acima da média histórica"
-              rows={historicalAlertRows.slice(0, 12)}
-              baseLabel="Média 12 meses"
-              compareLabel={effectiveAlertEndPeriod || "Período final"}
-              emptyMessage="Ainda não há histórico suficiente para comparar o último período com a média anterior."
-              totalValue={periodEndTotal}
+            <PiePanel
+              title={`${currentMetricNoun} por Unidade Gestora`}
+              items={topUnidades}
+              panelKey="unidade"
+              hoveredState={distributionHover}
+              onHoverChange={setDistributionHover}
+              othersItems={fullUnidades.slice(10)}
+              relationInfo={
+                distributionHover
+                  ? distributionHover.source === "unidade"
+                    ? distributionRelations.byUnidade.get(distributionHover.label)
+                    : distributionRelations.bySubelemento.get(distributionHover.label)
+                  : null
+              }
+              relationTargetLabel={
+                distributionHover?.source === "subelemento" ? "UGs relacionadas" : "Subelementos relacionados"
+              }
             />
           </section>
-        </>
-      )}
+        )}
 
-      {activeTab === "insights" && (
-        <section className="bi-grid">
-          <section className="bi-panel">
-            <div className="bi-panel-header">
-              <h3>Origem e alimentação</h3>
+        {activeTab === "trends" && (
+          <section className="bi-grid">
+            <BarList
+              title={`Subelementos com Maior ${currentMetricNoun}`}
+              items={rankingSubelementos}
+              onClickItem={setSelectedSubelementInRanking}
+              selectedItem={selectedSubelementInRanking}
+              limitHeight
+            />
+            <BarList
+              title={`Unidades Gestoras com Maior ${currentMetricNoun}`}
+              items={rankingUnidades}
+              onClickItem={setSelectedUgInRanking}
+              selectedItem={selectedUgInRanking}
+              limitHeight
+            />
+          </section>
+        )}
+
+        {activeTab === "matrix" && (
+          <section className="bi-grid">
+            <MatrixPanel
+              title="Valores por Subelemento e Ano"
+              rows={matrixBySubelemento}
+              years={years}
+              matrixSearch={matrixSearch}
+              onMatrixSearch={setMatrixSearch}
+            />
+            <MatrixPanel
+              title="Valores por Unidade Gestora e Ano"
+              rows={matrixByUnidade}
+              years={years}
+              matrixSearch={matrixSearch}
+              onMatrixSearch={setMatrixSearch}
+            />
+          </section>
+        )}
+
+        {activeTab === "ugRanking" && (
+          <>
+            <div className="bi-tab-header">
+              <div className="bi-filter-group">
+                <label>Frequência da Evolução</label>
+                <div className="bi-toggle-group">
+                  <button
+                    type="button"
+                    className={evolutionType === "monthly" ? "is-active" : ""}
+                    onClick={() => setEvolutionType("monthly")}
+                  >
+                    Série Mensal
+                  </button>
+                  <button
+                    type="button"
+                    className={evolutionType === "annual" ? "is-active" : ""}
+                    onClick={() => setEvolutionType("annual")}
+                  >
+                    Série Anual
+                  </button>
+                </div>
+              </div>
             </div>
-            <div className="bi-narrative">
-              <p>Agora o painel usa o cache oficial consolidado do portal, sem depender das planilhas do Power BI.</p>
-              <p>
-                O script <code>scripts/build-custeio-cache.mjs</code> baixa os ZIPs mensais oficiais e gera{" "}
-                <code>public/data/custeio-oficial.json</code>.
-              </p>
-              <p>
-                A configuração da fonte está em <code>src/config/custeioDataSource.js</code>.
-              </p>
-            </div>
-          </section>
-        </section>
-      )}
+
+            <section className="bi-grid bi-grid-single">
+              <TopUgTrendLinesPanel
+                title={`Evolução ${evolutionType === "monthly" ? "Mensal" : "Anual"} (Top 10 UGs)`}
+                periods={topUgTrendSeries.periods}
+                series={topUgTrendSeries.series}
+                metricLabel={currentMetricLabel}
+                large
+                selectedPeriodKey={selectedRankingPeriod}
+                onSelectPeriod={setSelectedRankingPeriod}
+              />
+            </section>
+          </>
+        )}
+
+        {activeTab === "alerts" && (
+          <>
+            <section className="bi-grid">
+              <section className="bi-panel">
+                <div className="bi-panel-header">
+                  <h3>Monitoramento Contínuo</h3>
+                  <span>Leitura incremental sobre a base oficial</span>
+                </div>
+
+                <div className="bi-alert-controls">
+                  <div className="bi-filter-group">
+                    <label htmlFor="alert-grouping">Agrupamento da Leitura</label>
+                    <select id="alert-grouping" value={alertGrouping} onChange={(e) => setAlertGrouping(e.target.value)}>
+                      <option value="subelemento">Subelemento</option>
+                      <option value="unidade">Unidade Gestora</option>
+                      <option value="elemento">Elemento</option>
+                    </select>
+                  </div>
+
+                  <div className="bi-filter-group">
+                    <label htmlFor="alert-threshold">Limite de Alerta (%)</label>
+                    <input
+                      id="alert-threshold"
+                      type="number"
+                      min="0"
+                      step="1"
+                      className="bi-search-input"
+                      value={alertThreshold}
+                      onChange={(e) => setAlertThreshold(Math.max(0, Number(e.target.value) || 0))}
+                    />
+                  </div>
+                </div>
+
+                <div className="bi-narrative">
+                  <p>
+                    Esta trilha compara o primeiro e o último período do recorte atual e também verifica se o último
+                    período ficou acima da média dos 12 meses anteriores.
+                  </p>
+                  <p>
+                    Sugestão de leitura: 10% para alertas mensais e 50% para leituras anuais. O ajuste aqui afeta somente
+                    esta aba.
+                  </p>
+                </div>
+              </section>
+
+              <InsightCards cards={alertInsightCards} />
+            </section>
+
+            <section className="bi-grid bi-grid-single">
+              <AlertTable
+                title="Variações Acima do Limite entre o Início e o Fim do Recorte"
+                rows={periodComparisonRows.slice(0, 12)}
+                baseLabel={effectiveAlertStartPeriod || "Início"}
+                compareLabel={effectiveAlertEndPeriod || "Fim"}
+                emptyMessage="Selecione um intervalo com ao menos dois períodos para montar os alertas de comparação."
+                totalValue={periodEndTotal}
+              />
+              <AlertTable
+                title="Desvios Acima da Média Histórica"
+                rows={historicalAlertRows.slice(0, 12)}
+                baseLabel="Média 12 Meses"
+                compareLabel={effectiveAlertEndPeriod || "Período Final"}
+                emptyMessage="Ainda não há histórico suficiente para comparar o último período com a média anterior."
+                totalValue={periodEndTotal}
+              />
+            </section>
+          </>
+        )}
+      </div>
     </div>
   );
 }

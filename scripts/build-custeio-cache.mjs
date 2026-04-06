@@ -1,9 +1,6 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { createInflateRaw } from "node:zlib";
-import { Readable } from "node:stream";
-import { pipeline } from "node:stream/promises";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(__dirname, "..");
@@ -11,8 +8,7 @@ const outDir = path.join(root, "public", "data");
 const outFile = path.join(outDir, "custeio-oficial.json");
 
 const official = {
-  baseUrl: "https://arquivos.transparencia.sc.gov.br/transparenciasc/dados-abertos/",
-  types: ["despesa", "restos"],
+  apiUrl: "https://api-portal-transparencia.apps.sm.okd4.ciasc.sc.gov.br/api",
   monthsByYear: {
     2021: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
     2022: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
@@ -21,11 +17,27 @@ const official = {
     2025: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
     2026: [1, 2],
   },
+  agrupamentos: ["ano", "mes", "elemento", "subelemento", "unidadegestora"],
+  indicador: 0,
 };
 
-function monthUrl(type, year, month) {
-  const m = String(month).padStart(2, "0");
-  return `${official.baseUrl}${type}/${year}/${type}_${year}_${m}.zip`;
+function periodKey(year, month) {
+  return `${year}${String(month).padStart(2, "0")}`;
+}
+
+function buildExportUrl(year, month) {
+  const url = new URL(`${official.apiUrl}/despesa/exportcsv`);
+  const value = periodKey(year, month);
+
+  url.searchParams.append("anomesinifiltro[]", value);
+  url.searchParams.append("anomesfimfiltro[]", value);
+
+  official.agrupamentos.forEach((group) => {
+    url.searchParams.append("agrupamentos[]", group);
+  });
+
+  url.searchParams.set("indicador", String(official.indicador));
+  return url.toString();
 }
 
 function parseBrazilianNumber(value) {
@@ -92,6 +104,12 @@ function getCell(row, idx, columnName) {
   return position === undefined ? "" : row[position] || "";
 }
 
+function decodeCsv(buffer) {
+  const utf8 = buffer.toString("utf-8");
+  if (!utf8.includes("\uFFFD")) return utf8;
+  return buffer.toString("latin1");
+}
+
 function parseCsvToRecords(text, accumulator) {
   const lines = text.split(/\r?\n/).filter(Boolean);
   if (lines.length < 2) return;
@@ -99,32 +117,20 @@ function parseCsvToRecords(text, accumulator) {
   const header = splitCsvLine(lines[0]);
   const idx = mapHeader(header);
 
-  // Identify value columns
-  const empenhadoCols = header.filter(c => {
-    const n = normalizeHeader(c);
-    return n.includes("empenhado") || n.includes("empenho");
-  });
-  const liquidadoCols = header.filter(c => normalizeHeader(c).includes("liquidado"));
-  const pagoCols = header.filter(c => normalizeHeader(c).includes("pago"));
-
   lines.slice(1).forEach((line) => {
     const row = splitCsvLine(line);
-    const year = Number(getCell(row, idx, "Ano"));
-    const month = Number(getCell(row, idx, "Nro Mês"));
-    const monthLabel = getCell(row, idx, "Mês").trim();
-    const elementoCode = getCell(row, idx, "Código Elemento").trim();
-    const elementoName = getCell(row, idx, "Elemento").trim();
-    const subelementoCode = getCell(row, idx, "Código Subelemento").trim();
-    const subelementoName = getCell(row, idx, "Subelemento").trim();
-    const unidadeCode = getCell(row, idx, "Código Unidade Gestora").trim() || "00000";
-    const unidadeName = getCell(row, idx, "Unidade Gestora").trim() || "Não Informado";
 
-    if (!year || !month || !subelementoCode) {
-      if (subelementoCode === "33903701") {
-        console.log(`PULOU LINHA DO SUB 33903701: ${year}/${month} | UG: ${unidadeCode}`);
-      }
-      return;
-    }
+    const year = Number(getCell(row, idx, "nuano"));
+    const month = Number(getCell(row, idx, "numes"));
+    const monthLabel = getCell(row, idx, "nmmes").trim();
+    const elementoCode = getCell(row, idx, "cdelemento").trim();
+    const elementoName = getCell(row, idx, "nmelemento").trim();
+    const subelementoCode = getCell(row, idx, "cdsubelemento").trim();
+    const subelementoName = getCell(row, idx, "nmsubelemento").trim();
+    const unidadeCode = getCell(row, idx, "cdunidadegestora").trim() || "00000";
+    const unidadeName = getCell(row, idx, "nmunidadegestora").trim() || "Nao Informado";
+
+    if (!year || !month || !subelementoCode) return;
 
     const recordKey = [
       year,
@@ -158,126 +164,47 @@ function parseCsvToRecords(text, accumulator) {
         vlpago: 0,
       };
 
-    // Sum all matching value columns (Exercise + RP)
-    empenhadoCols.forEach(col => { current.vlempenhado += parseBrazilianNumber(getCell(row, idx, col)); });
-    liquidadoCols.forEach(col => { current.vlliquidado += parseBrazilianNumber(getCell(row, idx, col)); });
-    pagoCols.forEach(col => { current.vlpago += parseBrazilianNumber(getCell(row, idx, col)); });
+    current.vlempenhado += parseBrazilianNumber(getCell(row, idx, "vlempenhado"));
+    current.vlliquidado += parseBrazilianNumber(getCell(row, idx, "vlliquidado"));
+    current.vlpago += parseBrazilianNumber(getCell(row, idx, "vlpago"));
 
     accumulator.set(recordKey, current);
   });
 }
 
-function readUInt32LE(bytes, offset) {
-  return (
-    bytes[offset] |
-    (bytes[offset + 1] << 8) |
-    (bytes[offset + 2] << 16) |
-    (bytes[offset + 3] << 24)
-  ) >>> 0;
-}
-
-function findSignature(bytes, signature, from = bytes.length - signature.length) {
-  for (let i = from; i >= 0; i -= 1) {
-    if (signature.every((value, index) => bytes[i + index] === value)) {
-      return i;
-    }
-  }
-
-  return -1;
-}
-
-async function extractSingleFileFromZip(buffer) {
-  const bytes = new Uint8Array(buffer);
-  const endOfCentralDir = findSignature(bytes, [0x50, 0x4b, 0x05, 0x06]);
-
-  if (endOfCentralDir === -1) {
-    throw new Error("Nao foi possivel localizar o diretorio central do ZIP oficial.");
-  }
-
-  const centralDirectoryOffset = readUInt32LE(bytes, endOfCentralDir + 16);
-  const centralDirectorySignature = readUInt32LE(bytes, centralDirectoryOffset);
-
-  if (centralDirectorySignature !== 0x02014b50) {
-    throw new Error("Estrutura de diretorio central invalida no ZIP oficial.");
-  }
-
-  const compressionMethod = bytes[centralDirectoryOffset + 10] | (bytes[centralDirectoryOffset + 11] << 8);
-  const compressedSize = readUInt32LE(bytes, centralDirectoryOffset + 20);
-  const fileNameLength = bytes[centralDirectoryOffset + 28] | (bytes[centralDirectoryOffset + 29] << 8);
-  const extraLength = bytes[centralDirectoryOffset + 30] | (bytes[centralDirectoryOffset + 31] << 8);
-  const commentLength = bytes[centralDirectoryOffset + 32] | (bytes[centralDirectoryOffset + 33] << 8);
-  const localHeaderOffset = readUInt32LE(bytes, centralDirectoryOffset + 42);
-
-  const localHeaderSignature = readUInt32LE(bytes, localHeaderOffset);
-  if (localHeaderSignature !== 0x04034b50) {
-    throw new Error("Cabecalho local invalido no ZIP oficial.");
-  }
-
-  const localNameLength = bytes[localHeaderOffset + 26] | (bytes[localHeaderOffset + 27] << 8);
-  const localExtraLength = bytes[localHeaderOffset + 28] | (bytes[localHeaderOffset + 29] << 8);
-  const dataStart = localHeaderOffset + 30 + localNameLength + localExtraLength;
-  const dataEnd = dataStart + compressedSize;
-  const payload = bytes.slice(dataStart, dataEnd);
-
-  if (compressionMethod === 0) {
-    return Buffer.from(payload);
-  }
-
-  if (compressionMethod === 8) {
-    const chunks = [];
-    const source = Readable.from(Buffer.from(payload));
-    const inflate = createInflateRaw();
-    inflate.on("data", (chunk) => chunks.push(chunk));
-    await pipeline(source, inflate);
-    return Buffer.concat(chunks);
-  }
-
-  throw new Error(`Metodo de compressao nao suportado: ${compressionMethod}`);
-}
-
-const records = new Map();
-
-// Helper to download with retries
 async function fetchWithRetry(url, retries = 3) {
-  for (let i = 0; i < retries; i++) {
+  for (let attempt = 0; attempt < retries; attempt += 1) {
     try {
       const response = await fetch(url);
       if (response.ok) return response;
       if (response.status === 404) return null;
-    } catch (err) {
-      if (i === retries - 1) throw err;
-      console.log(`Erro ao baixar, tentando novamente (${i + 1}/${retries})...`);
-      await new Promise(r => setTimeout(r, 2000));
+      throw new Error(`HTTP ${response.status}`);
+    } catch (error) {
+      if (attempt === retries - 1) throw error;
+      console.log(`Erro ao baixar ${url}, tentando novamente (${attempt + 1}/${retries})...`);
+      await new Promise((resolve) => setTimeout(resolve, 2000));
     }
   }
+
   return null;
 }
 
+const records = new Map();
+
 for (const [year, months] of Object.entries(official.monthsByYear)) {
   for (const month of months) {
-    for (const type of official.types) {
-      const url = monthUrl(type, year, month);
-      console.log(`Baixando ${url}`);
-      const response = await fetchWithRetry(url);
-      
-      if (!response) {
-        console.log(`Aviso: ${url} não encontrado ou falhou.`);
-        continue;
-      }
+    const url = buildExportUrl(year, month);
+    console.log(`Baixando ${url}`);
 
-      const zipBuffer = await response.arrayBuffer();
-      const csvBuffer = await extractSingleFileFromZip(zipBuffer);
-      
-      // Try UTF-8 first, then Latin1
-      let csvText;
-      try {
-        csvText = csvBuffer.toString("utf-8");
-        if (csvText.includes("�")) throw new Error("Messed up encoding");
-      } catch {
-        csvText = csvBuffer.toString("latin1");
-      }
-      parseCsvToRecords(csvText, records);
+    const response = await fetchWithRetry(url);
+    if (!response) {
+      console.log(`Aviso: exportacao oficial nao encontrada para ${year}-${String(month).padStart(2, "0")}.`);
+      continue;
     }
+
+    const buffer = Buffer.from(await response.arrayBuffer());
+    const csvText = decodeCsv(buffer);
+    parseCsvToRecords(csvText, records);
   }
 }
 
@@ -323,7 +250,7 @@ aggregatedRecords.forEach((record) => {
 
 const output = {
   generatedAt: new Date().toISOString(),
-  source: "Portal da Transparencia SC - Despesa do Poder Executivo",
+  source: "Portal da Transparencia SC - API oficial de Despesa",
   availableYears: [...new Set(aggregatedRecords.map((record) => record.year))].sort((a, b) => a - b),
   periodLabels,
   elementos: [...elementos.values()].sort((a, b) => a.label.localeCompare(b.label)),

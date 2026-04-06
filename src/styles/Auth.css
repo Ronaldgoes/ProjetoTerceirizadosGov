@@ -210,6 +210,36 @@
   right: 12px;
   display: flex;
   align-items: center;
+  pointer-events: none;
+}
+
+.auth-input-action {
+  position: absolute;
+  right: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
+  border: none;
+  background: transparent;
+  color: #64748B;
+  cursor: pointer;
+  transition: background 0.2s, color 0.2s;
+}
+
+.auth-input-action:hover {
+  background: rgba(255,255,255,0.1);
+  color: var(--accent-blue);
+}
+
+[data-theme="light"] .auth-input-action:hover {
+  background: rgba(0,0,0,0.05);
+}
+
+.auth-input-wrap input {
+  padding-right: 44px;
 }
 
 .auth-field-hint {

@@ -5,11 +5,19 @@
   box-sizing: border-box;
 }
 
+html, body, #root {
+  margin: 0;
+  padding: 0;
+  width: 100%;
+  min-height: 100vh;
+}
+
 body {
   margin: 0;
   padding: 0;
   background-color: #060D1A; /* Garante que o fundo do navegador seja escuro */
   -webkit-font-smoothing: antialiased;
+  overflow-x: hidden;
 }
 
 /* 2. SUAS VARIÁVEIS E ESTILOS */

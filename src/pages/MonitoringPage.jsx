@@ -8,16 +8,15 @@ import {
 import { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import { v4 as uuidv4 } from "uuid";
-import ThemeToggle from "../components/ThemeToggle";
-import NotificationBell from "../components/NotificationBell";
+import TopBar from "../components/TopBar";
 import { useAuth } from "../hooks/useAuth";
 import { db } from "../config/firebase";
 import "../styles/Auth.css";
 
 const METRICS = [
-  { value: "pago",       label: "Pago" },
-  { value: "liquidado",  label: "Liquidado" },
-  { value: "empenhado",  label: "Empenhado" },
+  { value: "pago",       label: "Pagamento" },
+  { value: "liquidado",  label: "Liquidação" },
+  { value: "empenhado",  label: "Empenhamento" },
 ];
 
 const TYPES = [
@@ -173,24 +172,9 @@ export default function MonitoringPage() {
     <div className="monitoring-page">
       <div className="auth-bg-glow auth-bg-glow--1" style={{ opacity: 0.4 }} />
 
-      {/* Topbar */}
-      <header className="monitoring-topbar">
-        <div className="monitoring-brand">
-          <Link to="/" className="monitoring-back">
-            <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
-              <path d="M10 3L5 8l5 5" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
-            </svg>
-            Início
-          </Link>
-          <span className="monitoring-title">Central de Monitoramento</span>
-        </div>
-        <div className="monitoring-topbar-actions">
-          {saving && <span className="monitoring-saving">Salvando...</span>}
-          <NotificationBell />
-          <ThemeToggle />
-          <button type="button" className="monitoring-logout" onClick={logout}>Sair</button>
-        </div>
-      </header>
+      <TopBar title="Monitoramento">
+        {saving && <span className="monitoring-saving">Salvando...</span>}
+      </TopBar>
 
       <div className="monitoring-layout">
         {/* Painel esquerdo: busca e lista */}

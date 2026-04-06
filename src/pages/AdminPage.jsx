@@ -11,7 +11,7 @@ import { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import { db } from "../config/firebase";
 import { useAuth } from "../hooks/useAuth";
-import ThemeToggle from "../components/ThemeToggle";
+import TopBar from "../components/TopBar";
 import "../styles/Auth.css";
 
 function formatDate(value) {
@@ -64,17 +64,7 @@ export default function AdminPage() {
     <div className="monitoring-page">
       <div className="auth-bg-glow auth-bg-glow--1" style={{ opacity: 0.35 }} />
 
-      <header className="monitoring-topbar">
-        <div className="monitoring-brand">
-          <Link to="/" className="monitoring-back">Inicio</Link>
-          <span className="monitoring-title">Painel Administrativo</span>
-        </div>
-        <div className="monitoring-topbar-actions">
-          <span className="header-status">{user?.email}</span>
-          <ThemeToggle />
-          <button type="button" className="monitoring-logout" onClick={logout}>Sair</button>
-        </div>
-      </header>
+      <TopBar title="Painel Administrativo" />
 
       <div className="admin-page-shell">
         <section className="admin-summary-grid">

@@ -1,8 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { NavLink, Route, Routes, useLocation, useParams } from "react-router-dom";
 import ContractsTable from "../components/ContractsTable";
-import NotificationBell from "../components/NotificationBell";
-import ThemeToggle from "../components/ThemeToggle";
+import TopBar from "../components/TopBar";
 import { useAuth } from "../hooks/useAuth";
 import { ORGAOS } from "../data/organs";
 import { buildContractGroups } from "../utils/contractGroups";
@@ -119,41 +118,22 @@ export default function ContractsDashboardPage() {
 
   return (
     <div className="dashboard-container">
-      <header className="header-main">
-        <div className="header-brand">
-          <button
-            type="button"
-            className={`hamburger-button${menuOpen ? " is-open" : ""}`}
-            aria-label={menuOpen ? "Fechar menu de órgãos" : "Abrir menu de órgãos"}
-            aria-expanded={menuOpen}
-            aria-controls="orgao-navigation"
-            onClick={() => setMenuOpen((open) => !open)}
-          >
-            <span />
-            <span />
-            <span />
-          </button>
-          <div className="header-title">{currentOrgan?.nome}</div>
-        </div>
-
-        <div className="header-actions">
-          <span className="header-status">{statusMessage}</span>
-          <span className="header-status">{user?.email}</span>
-          <NavLink to="/monitoramento" className="nav-chip">
-            Monitoramento
-          </NavLink>
-          {isAdmin ? (
-            <NavLink to="/admin" className="nav-chip">
-              Admin
-            </NavLink>
-          ) : null}
-          <NotificationBell />
-          <ThemeToggle />
-          <button type="button" className="nav-chip nav-chip-button" onClick={logout}>
-            Sair
-          </button>
-        </div>
-      </header>
+      <TopBar title={currentOrgan?.nome}>
+        <button
+          type="button"
+          className={`hamburger-button${menuOpen ? " is-open" : ""}`}
+          aria-label={menuOpen ? "Fechar menu de órgãos" : "Abrir menu de órgãos"}
+          aria-expanded={menuOpen}
+          aria-controls="orgao-navigation"
+          onClick={() => setMenuOpen((open) => !open)}
+        >
+          <span />
+          <span />
+          <span />
+          <span style={{ marginLeft: "8px", fontSize: "12px", fontWeight: "600" }}>Órgãos</span>
+        </button>
+        {statusMessage && <span className="header-status" style={{ marginLeft: "12px" }}>{statusMessage}</span>}
+      </TopBar>
 
       <div className={`menu-overlay${menuOpen ? " is-open" : ""}`} onClick={() => setMenuOpen(false)} />
 
