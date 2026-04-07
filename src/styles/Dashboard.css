@@ -2767,6 +2767,14 @@
   line-height: 1.2;
 }
 
+.bi-insights strong.positive {
+  color: #10B981;
+}
+
+.bi-insights strong.negative {
+  color: #F87171;
+}
+
 .bi-insights span {
   color: #94A3B8;
   font-size: 0.82rem;

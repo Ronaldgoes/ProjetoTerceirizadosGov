@@ -15,42 +15,9 @@ const official = {
     2023: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
     2024: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
     2025: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
-    2026: [1, 2],
+    2026: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
   },
   agrupamentos: ["ano", "mes", "elemento", "subelemento", "unidadegestora"],
-  elementoFilter: [
-    "3",
-    "5",
-    "8",
-    "13",
-    "14",
-    "15",
-    "18",
-    "19",
-    "20",
-    "27",
-    "30",
-    "31",
-    "32",
-    "33",
-    "34",
-    "35",
-    "36",
-    "37",
-    "38",
-    "39",
-    "40",
-    "46",
-    "47",
-    "48",
-    "49",
-    "59",
-    "67",
-    "86",
-    "91",
-    "92",
-    "93",
-  ],
   subelementoPrefix: "33",
   indicador: 0,
 };
@@ -68,10 +35,6 @@ function buildExportUrl(year, month) {
 
   official.agrupamentos.forEach((group) => {
     url.searchParams.append("agrupamentos[]", group);
-  });
-
-  official.elementoFilter.forEach((elementoCode) => {
-    url.searchParams.append("elementofiltro[]", elementoCode);
   });
 
   url.searchParams.set("indicador", String(official.indicador));
