@@ -13,6 +13,8 @@ const METRICS = [
   { key: "vlpago", label: "Pagamento" },
 ];
 
+const CUSTEIO_SUBELEMENTO_PREFIX = "33";
+
 const PAGE_TABS = [
   { key: "overview", label: "Visão Anual" },
   { key: "monthly", label: "Visão Mensal" },
@@ -1457,41 +1459,65 @@ export default function CusteioDashboard() {
       };
     }
 
+    const relevantFacts = dataset.facts.filter(([, , , subelementoCode]) =>
+      String(subelementoCode || "").startsWith(CUSTEIO_SUBELEMENTO_PREFIX)
+    );
+    const relevantElementCodes = new Set(relevantFacts.map(([, , elementoCode]) => String(elementoCode)));
+    const relevantSubelementCodes = new Set(relevantFacts.map(([, , , subelementoCode]) => String(subelementoCode)));
+    const relevantUnidadeCodes = new Set(relevantFacts.map(([, , , , unidadeCode]) => String(unidadeCode)));
+
     return {
-      elementos: new Map(dataset.elementos.map((item) => [item.code, item])),
-      subelementos: new Map(dataset.subelementos.map((item) => [item.code, item])),
-      unidades: new Map(dataset.unidades.map((item) => [item.code, item])),
+      elementos: new Map(
+        dataset.elementos
+          .filter((item) => relevantElementCodes.has(String(item.code)))
+          .map((item) => [item.code, item])
+      ),
+      subelementos: new Map(
+        dataset.subelementos
+          .filter((item) => relevantSubelementCodes.has(String(item.code)))
+          .map((item) => [item.code, item])
+      ),
+      unidades: new Map(
+        dataset.unidades
+          .filter((item) => relevantUnidadeCodes.has(String(item.code)))
+          .map((item) => [item.code, item])
+      ),
     };
   }, [dataset]);
 
   const records = useMemo(() => {
     if (!dataset) return [];
 
-    return dataset.facts.map(([year, month, elementoCode, subelementoCode, unidadeCode, vlempenhado, vlliquidado, vlpago]) => {
-      const elemento = dimensionLookup.elementos.get(elementoCode);
-      const subelemento = dimensionLookup.subelementos.get(subelementoCode);
-      const unidade = dimensionLookup.unidades.get(unidadeCode);
-      const periodKey = `${year}-${String(month).padStart(2, "0")}`;
+    return dataset.facts
+      .filter(([, , , subelementoCode]) => String(subelementoCode || "").startsWith(CUSTEIO_SUBELEMENTO_PREFIX))
+      .map(([year, month, elementoCode, subelementoCode, unidadeCode, vlempenhado, vlliquidado, vlpago]) => {
+        const elemento = dimensionLookup.elementos.get(elementoCode);
+        const subelemento = dimensionLookup.subelementos.get(subelementoCode);
+        const unidade = dimensionLookup.unidades.get(unidadeCode);
+        const periodKey = `${year}-${String(month).padStart(2, "0")}`;
 
-      return {
-        year,
-        month,
-        periodKey,
-        monthLabel: dataset.periodLabels?.[periodKey] || periodKey,
-        elementoCode,
-        elementoLabel: elemento?.label || elementoCode,
-        subelementoCode,
-        subelementoLabel: subelemento?.label || subelementoCode,
-        unidadeGestoraCode: unidadeCode,
-        unidadeGestoraLabel: unidade?.label || unidadeCode,
-        vlempenhado,
-        vlliquidado,
-        vlpago,
-      };
-    });
+        return {
+          year,
+          month,
+          periodKey,
+          monthLabel: dataset.periodLabels?.[periodKey] || periodKey,
+          elementoCode,
+          elementoLabel: elemento?.label || elementoCode,
+          subelementoCode,
+          subelementoLabel: subelemento?.label || subelementoCode,
+          unidadeGestoraCode: unidadeCode,
+          unidadeGestoraLabel: unidade?.label || unidadeCode,
+          vlempenhado,
+          vlliquidado,
+          vlpago,
+        };
+      });
   }, [dataset, dimensionLookup]);
 
-  const availableYears = useMemo(() => dataset?.availableYears || [], [dataset]);
+  const availableYears = useMemo(
+    () => [...new Set(records.map((record) => record.year))].sort((a, b) => a - b),
+    [records]
+  );
 
   const periodOptions = useMemo(() => {
     if (!records.length) return [];
@@ -1508,11 +1534,11 @@ export default function CusteioDashboard() {
     if (!dataset) return { elementos: [], subelementos: [], unidades: [] };
 
     return {
-      elementos: createOptions(dataset.elementos),
-      subelementos: createOptions(dataset.subelementos),
-      unidades: createOptions(dataset.unidades),
+      elementos: createOptions([...dimensionLookup.elementos.values()]),
+      subelementos: createOptions([...dimensionLookup.subelementos.values()]),
+      unidades: createOptions([...dimensionLookup.unidades.values()]),
     };
-  }, [dataset]);
+  }, [dataset, dimensionLookup]);
 
   const historyScopedRecords = useMemo(() => {
     if (!records.length) return [];

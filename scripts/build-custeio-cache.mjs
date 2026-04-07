@@ -18,6 +18,40 @@ const official = {
     2026: [1, 2],
   },
   agrupamentos: ["ano", "mes", "elemento", "subelemento", "unidadegestora"],
+  elementoFilter: [
+    "3",
+    "5",
+    "8",
+    "13",
+    "14",
+    "15",
+    "18",
+    "19",
+    "20",
+    "27",
+    "30",
+    "31",
+    "32",
+    "33",
+    "34",
+    "35",
+    "36",
+    "37",
+    "38",
+    "39",
+    "40",
+    "46",
+    "47",
+    "48",
+    "49",
+    "59",
+    "67",
+    "86",
+    "91",
+    "92",
+    "93",
+  ],
+  subelementoPrefix: "33",
   indicador: 0,
 };
 
@@ -34,6 +68,10 @@ function buildExportUrl(year, month) {
 
   official.agrupamentos.forEach((group) => {
     url.searchParams.append("agrupamentos[]", group);
+  });
+
+  official.elementoFilter.forEach((elementoCode) => {
+    url.searchParams.append("elementofiltro[]", elementoCode);
   });
 
   url.searchParams.set("indicador", String(official.indicador));
@@ -131,6 +169,7 @@ function parseCsvToRecords(text, accumulator) {
     const unidadeName = getCell(row, idx, "nmunidadegestora").trim() || "Nao Informado";
 
     if (!year || !month || !subelementoCode) return;
+    if (!subelementoCode.startsWith(official.subelementoPrefix)) return;
 
     const recordKey = [
       year,
@@ -250,7 +289,7 @@ aggregatedRecords.forEach((record) => {
 
 const output = {
   generatedAt: new Date().toISOString(),
-  source: "Portal da Transparencia SC - API oficial de Despesa",
+  source: "Portal da Transparência SC - API oficial de Despesa (Grupo Natureza 33 - Outras Despesas Correntes)",
   availableYears: [...new Set(aggregatedRecords.map((record) => record.year))].sort((a, b) => a - b),
   periodLabels,
   elementos: [...elementos.values()].sort((a, b) => a.label.localeCompare(b.label)),
