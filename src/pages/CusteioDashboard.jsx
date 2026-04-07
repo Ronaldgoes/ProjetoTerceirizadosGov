@@ -1,10 +1,11 @@
-import { useDeferredValue, useEffect, useMemo, useState } from "react";
+﻿import { useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router-dom";
+import MatrixPanelView from "../components/MatrixPanel";
 import TopBar from "../components/TopBar";
 import { CUSTEIO_DATA_CONTRACT } from "../config/custeioDataContract";
 import { CUSTEIO_DATA_SOURCE } from "../config/custeioDataSource";
 import { useAuth } from "../hooks/useAuth";
-import ThemeToggle from "../components/ThemeToggle";
+import { buildMatrixRows as buildMatrixRowsHelper } from "../utils/matrix";
 
 const METRICS = [
   { key: "vlempenhado", label: "Empenhamento" },
@@ -28,9 +29,73 @@ const IPCA_ANUAL = {
   2021: 10.06,
   2022: 5.79,
   2023: 4.62,
-  2024: 4.42,
-  2025: 4.50,
-  2026: 4.00,
+  2024: 4.83,
+  2025: 4.26,
+  2026: 0.33,
+};
+
+const IPCA_MENSAL = {
+  "2021-01": 0.25,
+  "2021-02": 0.86,
+  "2021-03": 0.93,
+  "2021-04": 0.31,
+  "2021-05": 0.83,
+  "2021-06": 0.53,
+  "2021-07": 0.96,
+  "2021-08": 0.87,
+  "2021-09": 1.16,
+  "2021-10": 1.25,
+  "2021-11": 0.95,
+  "2021-12": 0.73,
+  "2022-01": 0.54,
+  "2022-02": 1.01,
+  "2022-03": 1.62,
+  "2022-04": 1.06,
+  "2022-05": 0.47,
+  "2022-06": 0.67,
+  "2022-07": -0.68,
+  "2022-08": -0.36,
+  "2022-09": -0.29,
+  "2022-10": 0.59,
+  "2022-11": 0.41,
+  "2022-12": 0.62,
+  "2023-01": 0.53,
+  "2023-02": 0.84,
+  "2023-03": 0.71,
+  "2023-04": 0.61,
+  "2023-05": 0.23,
+  "2023-06": -0.08,
+  "2023-07": 0.12,
+  "2023-08": 0.23,
+  "2023-09": 0.26,
+  "2023-10": 0.24,
+  "2023-11": 0.28,
+  "2023-12": 0.56,
+  "2024-01": 0.42,
+  "2024-02": 0.83,
+  "2024-03": 0.16,
+  "2024-04": 0.38,
+  "2024-05": 0.46,
+  "2024-06": 0.21,
+  "2024-07": 0.38,
+  "2024-08": -0.02,
+  "2024-09": 0.44,
+  "2024-10": 0.56,
+  "2024-11": 0.39,
+  "2024-12": 0.52,
+  "2025-01": 0.16,
+  "2025-02": 1.31,
+  "2025-03": 0.56,
+  "2025-04": 0.43,
+  "2025-05": 0.26,
+  "2025-06": 0.24,
+  "2025-07": 0.26,
+  "2025-08": -0.11,
+  "2025-09": 0.48,
+  "2025-10": 0.09,
+  "2025-11": 0.18,
+  "2025-12": 0.33,
+  "2026-01": 0.33,
 };
 
 const fmtCurrency = (value) =>
@@ -247,11 +312,12 @@ function TopRankingPanel({ title, items, limit = 10 }) {
 }
 
 function PiePanel({ title, items, panelKey, hoveredState, onHoverChange, relationInfo, relationTargetLabel, othersItems = [] }) {
-  const hoveredLabel = hoveredState?.source === panelKey ? hoveredState.label : null;
+  const safeHoverState = hoveredState && typeof hoveredState === "object" ? hoveredState : null;
+  const hoveredLabel = safeHoverState?.source === panelKey ? safeHoverState.label : null;
   const isOthersSelected = hoveredLabel === "Outras Despesas";
   const relatedLabels =
-    hoveredState?.source && hoveredState.source !== panelKey
-      ? new Set(relationInfo?.items.map((item) => item.label) || [])
+    safeHoverState?.source && safeHoverState.source !== panelKey
+      ? new Set(relationInfo?.items?.map((item) => item.label) || [])
       : null;
   const selectedLabels = hoveredLabel ? new Set([hoveredLabel]) : relatedLabels;
   const { segments, background, activeSegment, highlightedSegments } = buildPieSegments(
@@ -305,7 +371,7 @@ function PiePanel({ title, items, panelKey, hoveredState, onHoverChange, relatio
                 }`}
                 onClick={() =>
                   onHoverChange?.(
-                    hoveredState?.source === panelKey && hoveredState?.label === segment.label
+                    safeHoverState?.source === panelKey && safeHoverState?.label === segment.label
                       ? null
                       : { source: panelKey, label: segment.label }
                   )
@@ -342,16 +408,16 @@ function PiePanel({ title, items, panelKey, hoveredState, onHoverChange, relatio
             Limpar seleção
           </button>
         </div>
-      ) : hoveredState && relationInfo ? (
+      ) : safeHoverState && relationInfo ? (
         <div className="bi-pie-relationship-card">
           <strong>
-            {hoveredState.label}
+            {safeHoverState.label}
             {" -> "}
             {relationTargetLabel}
           </strong>
           <div className="bi-pie-relationship-list">
             {relationInfo.items.map((item) => (
-              <div key={`${hoveredState.label}-${item.label}`} className="bi-pie-relationship-item">
+              <div key={`${safeHoverState.label}-${item.label}`} className="bi-pie-relationship-item">
                 <span>{item.label}</span>
                 <span>{fmtPercent(item.pct)} | {fmtCurrency(item.value)}</span>
               </div>
@@ -414,14 +480,16 @@ function TopUgTrendLinesPanel({
   large = false,
   selectedPeriodKey,
   onSelectPeriod,
+  selectedSeriesLabel,
+  onSelectSeries,
 }) {
   // Configuração de dimensões
   const isMonthlySeries = periods.some((period) => String(period.periodKey).includes("-"));
-  const minWidthPerPeriod = isMonthlySeries ? 72 : large ? 108 : 100;
-  const chartWidth = Math.max(isMonthlySeries ? 820 : 1000, periods.length * minWidthPerPeriod);
-  const chartHeight = 450;
+  const minWidthPerPeriod = isMonthlySeries ? 64 : large ? 88 : 80;
+  const chartWidth = Math.max(isMonthlySeries ? 760 : 680, periods.length * minWidthPerPeriod);
+  const chartHeight = isMonthlySeries ? 320 : 340;
   
-  const padding = { top: 40, right: 60, bottom: 80, left: 100 };
+  const padding = { top: 26, right: 24, bottom: 56, left: 72 };
   const innerWidth = chartWidth - padding.left - padding.right;
   const innerHeight = chartHeight - padding.top - padding.bottom;
   const pointDivisor = Math.max(periods.length - 1, 1);
@@ -442,11 +510,17 @@ function TopUgTrendLinesPanel({
 
   const handleMouseEnterLine = (label) => setHoveredLine(label);
   const handleMouseLeaveLine = () => setHoveredLine(null);
+  const ugPanelRef = useRef(null);
+  const detailPanelRef = useRef(null);
   const handleTogglePeriod = (periodKey) => {
     if (!onSelectPeriod) return;
     onSelectPeriod(selectedPeriodKey === periodKey ? null : periodKey);
+    window.requestAnimationFrame(() => {
+      ugPanelRef.current?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+    });
   };
   const getPointX = (index) => padding.left + (Math.max(index, 0) / pointDivisor) * innerWidth;
+  const getPointY = (value) => padding.top + innerHeight - (value / maxValue) * innerHeight;
 
   const overview = useMemo(() => {
     const latestPeriod = periods[periods.length - 1];
@@ -493,6 +567,23 @@ function TopUgTrendLinesPanel({
           accent: overview.leader.color,
         }
       : null;
+  const topPeak = overview.rankedSeries
+    .flatMap((line) => (line.peakPoint ? [{ label: line.label, point: line.peakPoint }] : []))
+    .sort((a, b) => b.point.value - a.point.value)[0] || null;
+  const selectedSeries = series.find((line) => line.label === selectedSeriesLabel) || overview.leader || null;
+  const detailPeriodKey = activePeriod || overview.latestPeriod?.periodKey || null;
+  const detailPeriodLabel = activePeriodLabel || overview.latestPeriod?.fullLabel || "--";
+  const detailSubelements =
+    selectedSeries?.topSubelementsByPeriod?.get(detailPeriodKey) ||
+    selectedSeries?.topSubelementsOverall ||
+    [];
+
+  const handleSelectSeries = (label) => {
+    onSelectSeries?.(label);
+    window.requestAnimationFrame(() => {
+      detailPanelRef.current?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+    });
+  };
 
   return (
     <section className="bi-panel">
@@ -516,6 +607,10 @@ function TopUgTrendLinesPanel({
               <span>Total das Top 10</span>
               <strong>{fmtCurrency(overview.focusTotal)}</strong>
             </div>
+            <div className="bi-evolution-kpi">
+              <span>Pico da série</span>
+              <strong>{topPeak ? `${topPeak.label} · ${fmtCompact(topPeak.point.value)}` : "--"}</strong>
+            </div>
           </div>
 
           <div className="bi-evolution-toolbar">
@@ -531,7 +626,7 @@ function TopUgTrendLinesPanel({
           </div>
 
           <div className="bi-evolution-periods">
-            {axisLabels.map((period) => (
+            {(isMonthlySeries ? periods : axisLabels).map((period) => (
               <button
                 key={period.periodKey}
                 type="button"
@@ -555,6 +650,7 @@ function TopUgTrendLinesPanel({
           )}
 
           <div className="bi-evolution-body">
+          <div className="bi-evolution-chart-card">
           <div className="bi-linechart-scroll-container">
             <div className="bi-linechart-wrapper" style={{ width: `${chartWidth}px` }}>
               <svg
@@ -575,12 +671,7 @@ function TopUgTrendLinesPanel({
                         stroke="rgba(148, 163, 184, 0.1)"
                         strokeWidth="1"
                       />
-                      <text
-                        x={padding.left - 15}
-                        y={y + 5}
-                        textAnchor="end"
-                        className="bi-chart-axis-text"
-                      >
+                      <text x={padding.left - 10} y={y + 4} textAnchor="end" className="bi-chart-axis-text">
                         {fmtCompact(maxValue * step)}
                       </text>
                     </g>
@@ -589,7 +680,7 @@ function TopUgTrendLinesPanel({
 
                 {/* Eixo X - Guias Verticais e Rótulos */}
                 {periods.map((period, index) => {
-                  const isLabelVisible = axisLabels.some((label) => label.periodKey === period.periodKey);
+                  const isLabelVisible = isMonthlySeries || axisLabels.some((label) => label.periodKey === period.periodKey);
                   const x = getPointX(index);
 
                   return (
@@ -605,10 +696,9 @@ function TopUgTrendLinesPanel({
                       {isLabelVisible && (
                         <text
                           x={x}
-                          y={chartHeight - 30}
+                          y={chartHeight - 20}
                           textAnchor="middle"
                           className="bi-chart-axis-text"
-                          style={{ fontWeight: "600" }}
                         >
                           {period.shortLabel}
                         </text>
@@ -636,8 +726,7 @@ function TopUgTrendLinesPanel({
                   const pathD = line.points
                     .map((point, index) => {
                       const x = getPointX(index);
-                      const y = padding.top + innerHeight - (point.value / maxValue) * innerHeight;
-                      return `${index === 0 ? "M" : "L"} ${x} ${y}`;
+                      return `${index === 0 ? "M" : "L"} ${x} ${getPointY(point.value)}`;
                     })
                     .join(" ");
 
@@ -654,23 +743,22 @@ function TopUgTrendLinesPanel({
                         d={pathD}
                         fill="none"
                         stroke={line.color}
-                        strokeWidth={hoveredLine === line.label ? "6" : "3"}
-                        strokeOpacity={isDimmed ? "0.1" : "1"}
+                        strokeWidth={hoveredLine === line.label ? "4" : "2.5"}
+                        strokeOpacity={isDimmed ? "0.14" : "0.95"}
                         strokeLinecap="round"
                         strokeLinejoin="round"
                         className="bi-chart-path"
                       />
                       {line.points.map((point, index) => {
                         const x = getPointX(index);
-                        const y = padding.top + innerHeight - (point.value / maxValue) * innerHeight;
                         return (
                           <circle
                             key={`${line.label}-${point.periodKey}`}
                             cx={x}
-                            cy={y}
-                            r={hoveredLine === line.label ? 7 : 4}
+                            cy={getPointY(point.value)}
+                            r={hoveredLine === line.label ? 5.5 : 3.5}
                             fill={line.color}
-                            fillOpacity={isDimmed ? "0.1" : "1"}
+                            fillOpacity={isDimmed ? "0.18" : "1"}
                             onMouseEnter={(e) => {
                               e.stopPropagation();
                               setHoveredPoint({
@@ -692,8 +780,13 @@ function TopUgTrendLinesPanel({
               </svg>
             </div>
           </div>
+          <div className="bi-evolution-footnote">
+            <span>{isMonthlySeries ? "Rolagem horizontal liberada para acomodar todos os meses." : "Visão anual consolidada das 10 UGs líderes."}</span>
+            <span>{activePeriodLabel ? `Foco atual: ${activePeriodLabel}` : "Sem foco travado"}</span>
+          </div>
+          </div>
 
-            <section className="bi-evolution-ug-panel">
+            <section ref={ugPanelRef} className="bi-evolution-ug-panel">
               <div className="bi-evolution-ug-header">
                 <strong>UGs monitoradas</strong>
                 <span>{activePeriod ? `Ranking em ${activePeriodLabel}` : "Último período disponível"}</span>
@@ -711,11 +804,13 @@ function TopUgTrendLinesPanel({
                     : "--";
 
                   return (
-                    <div
+                    <button
                       key={line.label}
-                      className={`bi-linechart-legend-item${hoveredLine === line.label ? " is-active" : ""}`}
+                      type="button"
+                      className={`bi-linechart-legend-item${hoveredLine === line.label || selectedSeries?.label === line.label ? " is-active" : ""}`}
                       onMouseEnter={() => setHoveredLine(line.label)}
                       onMouseLeave={handleMouseLeaveLine}
+                      onClick={() => handleSelectSeries(line.label)}
                     >
                       <span className="bi-linechart-rank">{index + 1}</span>
                       <span className="bi-linechart-swatch" style={{ background: line.color }} />
@@ -725,9 +820,30 @@ function TopUgTrendLinesPanel({
                         <span>{deltaLabel}</span>
                         <span>Pico: {fmtCurrency(line.peakPoint?.value || 0)} em {peakPeriodLabel}</span>
                       </div>
-                    </div>
+                    </button>
                   );
                 })}
+              </div>
+              <div ref={detailPanelRef} className="bi-evolution-detail-panel">
+                <div className="bi-evolution-detail-header">
+                  <strong>{selectedSeries?.label || "Selecione uma UG"}</strong>
+                  <span>Top 10 subelementos em {detailPeriodLabel}</span>
+                </div>
+                <div className="bi-evolution-detail-list">
+                  {detailSubelements.length > 0 ? (
+                    detailSubelements.slice(0, 10).map((item, index) => (
+                      <div key={`${selectedSeries?.label || "ug"}-${item.label}`} className="bi-evolution-detail-item">
+                        <span className="bi-evolution-detail-rank">{String(index + 1).padStart(2, "0")}</span>
+                        <div className="bi-evolution-detail-copy">
+                          <strong>{item.label}</strong>
+                          <span>{fmtCurrency(item.value)}</span>
+                        </div>
+                      </div>
+                    ))
+                  ) : (
+                    <div className="bi-evolution-detail-empty">Sem subelementos para o recorte selecionado.</div>
+                  )}
+                </div>
               </div>
             </section>
           </div>
@@ -793,10 +909,13 @@ function VariationTable({ rows, title = "Variação Anual", periodLabel = "Ano",
   const withVariation = rows.map((current, index) => {
     const previous = rows[index - 1];
     const variation = previous?.value ? ((current.value - previous.value) / previous.value) * 100 : Number.NaN;
-    const ipcaValue =
-      showIPCA && (valueKey === "year" || valueKey === "period")
+    const rawIpcaValue =
+      showIPCA && valueKey === "year"
         ? IPCA_ANUAL[String(current[valueKey]).substring(0, 4)]
-        : null;
+        : showIPCA && valueKey === "period"
+          ? IPCA_MENSAL[String(current[valueKey])]
+          : null;
+    const ipcaValue = Number.isFinite(rawIpcaValue) ? rawIpcaValue : null;
     const dissonance = ipcaValue !== null && !Number.isNaN(variation) ? variation - ipcaValue : null;
 
     let dissonanceColor = "";
@@ -814,6 +933,7 @@ function VariationTable({ rows, title = "Variação Anual", periodLabel = "Ano",
       dissonanceColor,
     };
   });
+  const formatRowLabel = (row) => (valueKey === "period" ? formatPeriodLabel(row[valueKey]) : row[valueKey]);
 
   return (
     <section className="bi-panel">
@@ -821,34 +941,35 @@ function VariationTable({ rows, title = "Variação Anual", periodLabel = "Ano",
         <h3>{title}</h3>
       </div>
 
-      <div className="bi-table">
+      <div className={`bi-table${showIPCA ? " has-ipca" : ""}`}>
         <div className="bi-table-row bi-table-head">
-          <span>{periodLabel} {showIPCA && "| IPCA"}</span>
-          <span>Total {showIPCA && "| Dissonância"}</span>
+          <span>{periodLabel}</span>
+          <span>Total</span>
           <span>Variação</span>
+          {showIPCA && <span>IPCA</span>}
+          {showIPCA && <span>Dissonância</span>}
         </div>
         {withVariation.map((row) => (
           <div key={row[valueKey]} className="bi-table-row">
-            <div className="bi-table-cell-combined">
-              <span>{row[valueKey]}</span>
-              {showIPCA && <span className="bi-table-subtext">{row.ipcaValue !== null ? `${row.ipcaValue.toFixed(2)}%` : "--"}</span>}
-            </div>
-            <div className="bi-table-cell-combined">
-              <span>{fmtCurrency(row.value)}</span>
-              {showIPCA && (
-                <span className={`bi-table-subtext ${row.dissonanceColor}`}>
-                  {row.dissonance !== null ? `${row.dissonance.toFixed(2)} p.p.` : "--"}
-                </span>
-              )}
-            </div>
+            <span>{formatRowLabel(row)}</span>
+            <span>{fmtCurrency(row.value)}</span>
             <span className={row.variation >= 0 ? "positive" : "negative"}>{fmtPercent(row.variation)}</span>
+            {showIPCA && (
+              <span className="bi-table-subtext">
+                {Number.isFinite(row.ipcaValue) ? `${row.ipcaValue.toFixed(2)}%` : "--"}
+              </span>
+            )}
+            {showIPCA && (
+              <span className={`bi-table-subtext ${row.dissonanceColor}`}>
+                {Number.isFinite(row.dissonance) ? `${row.dissonance.toFixed(2)} p.p.` : "--"}
+              </span>
+            )}
           </div>
         ))}
       </div>
     </section>
   );
 }
-
 function MatrixPanel({ title, rows, years, matrixSearch, onMatrixSearch }) {
   return (
     <section className="bi-panel">
@@ -962,6 +1083,7 @@ function MultiSelectChecklist({
   onSearchChange,
   onToggleValue,
   onClear,
+  emptySelectionLabel = "Selecionar opções",
   className = "",
 }) {
   const [isOpen, setIsOpen] = useState(false);
@@ -975,7 +1097,7 @@ function MultiSelectChecklist({
       <div className="bi-multiselect">
         <button type="button" className="bi-multiselect-trigger" onClick={() => setIsOpen((open) => !open)}>
           <span className="bi-multiselect-trigger-text">
-            {selectedLabels.length > 0 ? `${selectedLabels.length} selecionado(s)` : "Selecionar subelementos"}
+            {selectedLabels.length > 0 ? `${selectedLabels.length} selecionado(s)` : emptySelectionLabel}
           </span>
           <span className="bi-multiselect-trigger-icon">{isOpen ? "▲" : "▼"}</span>
         </button>
@@ -1233,6 +1355,7 @@ export default function CusteioDashboard() {
   const [selectedPeriodStart, setSelectedPeriodStart] = useState("all");
   const [selectedPeriodEnd, setSelectedPeriodEnd] = useState("all");
   const [selectedRankingPeriod, setSelectedRankingPeriod] = useState(null);
+  const [selectedEvolutionUg, setSelectedEvolutionUg] = useState(null);
   const [evolutionType, setEvolutionType] = useState("monthly");
   const ugQuantity = 10; // Fixed at 10
   const [alertThreshold, setAlertThreshold] = useState(10);
@@ -1303,11 +1426,11 @@ export default function CusteioDashboard() {
       setStatus("");
       setRefreshInfo(
         syncCompleted
-          ? "Base oficial sincronizada com o Portal da Transparencia e painel recarregado."
-          : "Painel recarregado com a base oficial publicada disponivel."
+          ? "Base oficial sincronizada com o Portal da Transparência e painel recarregado."
+          : "Painel recarregado com a base oficial publicada disponível."
       );
     } catch (error) {
-      setStatus(error instanceof Error ? error.message : "Nao foi possivel sincronizar os dados oficiais do painel.");
+      setStatus(error instanceof Error ? error.message : "Não foi possível sincronizar os dados oficiais do painel.");
     } finally {
       setIsRefreshing(false);
     }
@@ -1636,16 +1759,24 @@ export default function CusteioDashboard() {
         value: periodValueMap.get(`${unit.label}::${period.periodKey}`) || 0,
       }));
 
-      // Top 5 subelements for this UG in the overall selected period
       const ugRecords = visibleRecords.filter((r) => r.unidadeGestoraLabel === unit.label);
-      const topSubelements = aggregateBy(ugRecords, "subelementoLabel", selectedMetric, 5);
+      const topSubelementsOverall = aggregateBy(ugRecords, "subelementoLabel", selectedMetric, 10);
+      const topSubelementsByPeriod = new Map(
+        periods.map((period) => {
+          const scopedRecords = ugRecords.filter((record) =>
+            evolutionType === "monthly" ? record.periodKey === period.periodKey : String(record.year) === period.periodKey
+          );
+          return [period.periodKey, aggregateBy(scopedRecords, "subelementoLabel", selectedMetric, 10)];
+        })
+      );
 
       return {
         label: unit.label,
         total: unit.value,
         color: colors[index % colors.length],
         points,
-        topSubelements,
+        topSubelementsOverall,
+        topSubelementsByPeriod,
       };
     });
 
@@ -1691,6 +1822,32 @@ export default function CusteioDashboard() {
       lastValue: lastYearTotal,
     };
   }, [selectedMetric, visibleRecords]);
+
+  useEffect(() => {
+    if (activeTab !== "ugRanking") return;
+    if (topUgTrendSeries.series.length === 0) {
+      setSelectedEvolutionUg(null);
+      return;
+    }
+
+    if (selectedRankingPeriod) {
+      const leaderForPeriod = [...topUgTrendSeries.series]
+        .map((line) => ({
+          label: line.label,
+          value: line.points.find((point) => point.periodKey === selectedRankingPeriod)?.value || 0,
+        }))
+        .sort((a, b) => b.value - a.value)[0];
+
+      if (leaderForPeriod?.label) {
+        setSelectedEvolutionUg(leaderForPeriod.label);
+        return;
+      }
+    }
+
+    if (!selectedEvolutionUg || !topUgTrendSeries.series.some((line) => line.label === selectedEvolutionUg)) {
+      setSelectedEvolutionUg(topUgTrendSeries.series[0]?.label || null);
+    }
+  }, [activeTab, selectedEvolutionUg, selectedRankingPeriod, topUgTrendSeries.series]);
 
   const effectiveAlertStartPeriod = selectedPeriodStart === "all" ? visiblePeriods[0]?.periodKey || null : selectedPeriodStart;
   const effectiveAlertEndPeriod =
@@ -1758,12 +1915,13 @@ export default function CusteioDashboard() {
   const matrixBySubelemento = useMemo(
     () =>
       activeTab === "matrix"
-        ? buildMatrixRows(
+        ? buildMatrixRowsHelper(
             visibleRecords,
             "subelementoLabel",
             selectedMetric,
             selectedYears,
             5000,
+            normalize,
             deferredMatrixSearch,
             selectedSubelementos.length > 0 ? selectedSubelementos : null,
             "subelementoCode"
@@ -1774,12 +1932,13 @@ export default function CusteioDashboard() {
   const matrixByUnidade = useMemo(
     () =>
       activeTab === "matrix"
-        ? buildMatrixRows(
+        ? buildMatrixRowsHelper(
             visibleRecords,
             "unidadeGestoraLabel",
             selectedMetric,
             selectedYears,
             5000,
+            normalize,
             deferredMatrixSearch,
             selectedUnidades.length > 0 ? selectedUnidades : null,
             "unidadeGestoraCode"
@@ -1877,6 +2036,7 @@ export default function CusteioDashboard() {
     setSelectedPeriodStart("all");
     setSelectedPeriodEnd("all");
     setSelectedRankingPeriod(null);
+    setSelectedEvolutionUg(null);
     setAlertThreshold(10);
     setAlertGrouping("subelemento");
     setGlobalSearch("");
@@ -2002,6 +2162,7 @@ export default function CusteioDashboard() {
               <MultiSelectChecklist
                 label="Elementos"
                 placeholder="Buscar código ou nome..."
+                emptySelectionLabel="Selecionar Elemento"
                 options={dimensionOptions.elementos}
                 selectedValues={selectedElementos}
                 searchValue={elementoSearch}
@@ -2015,6 +2176,7 @@ export default function CusteioDashboard() {
               <MultiSelectChecklist
                 label="Subelementos"
                 placeholder="Buscar código ou nome..."
+                emptySelectionLabel="Selecionar Subelemento"
                 options={dimensionOptions.subelementos}
                 selectedValues={selectedSubelementos}
                 searchValue={subelementoSearch}
@@ -2028,6 +2190,7 @@ export default function CusteioDashboard() {
               <MultiSelectChecklist
                 label="Unidades Gestoras"
                 placeholder="Buscar código ou nome..."
+                emptySelectionLabel="Selecionar Unidade Gestora"
                 options={dimensionOptions.unidades}
                 selectedValues={selectedUnidades}
                 searchValue={unidadeSearch}
@@ -2099,8 +2262,6 @@ export default function CusteioDashboard() {
                 lastValue={annualRangeSummary?.lastValue}
                 metricLabel={currentMetricLabel}
               />
-            </section>
-            <section className="bi-grid">
               <InsightCards cards={annualHighlights} />
             </section>
           </>
@@ -2125,9 +2286,9 @@ export default function CusteioDashboard() {
                 lastPeriod={monthlyRangeSummary.lastPeriod}
                 metricLabel={currentMetricLabel}
               />
+              <InsightCards title="Informações de Destaque" cards={monthlyHighlightsMaxMonth} />
             </section>
-            <section className="bi-grid">
-              <InsightCards title="Mês de Maior Gasto" cards={monthlyHighlightsMaxMonth} />
+            <section className="bi-grid bi-grid-single">
               <InsightCards title="Maior Variação" cards={monthlyHighlightsMaxVariation} />
             </section>
           </>
@@ -2194,20 +2355,24 @@ export default function CusteioDashboard() {
         )}
 
         {activeTab === "matrix" && (
-          <section className="bi-grid">
-            <MatrixPanel
+          <section className="bi-grid bi-grid-single">
+            <MatrixPanelView
               title="Valores por Subelemento e Ano"
               rows={matrixBySubelemento}
               years={years}
               matrixSearch={matrixSearch}
               onMatrixSearch={setMatrixSearch}
+              fmtCompact={fmtCompact}
+              fmtCurrency={fmtCurrency}
             />
-            <MatrixPanel
+            <MatrixPanelView
               title="Valores por Unidade Gestora e Ano"
               rows={matrixByUnidade}
               years={years}
               matrixSearch={matrixSearch}
               onMatrixSearch={setMatrixSearch}
+              fmtCompact={fmtCompact}
+              fmtCurrency={fmtCurrency}
             />
           </section>
         )}
@@ -2245,6 +2410,8 @@ export default function CusteioDashboard() {
                 large
                 selectedPeriodKey={selectedRankingPeriod}
                 onSelectPeriod={setSelectedRankingPeriod}
+                selectedSeriesLabel={selectedEvolutionUg}
+                onSelectSeries={setSelectedEvolutionUg}
               />
             </section>
           </>
@@ -2322,3 +2489,5 @@ export default function CusteioDashboard() {
     </div>
   );
 }
+
+

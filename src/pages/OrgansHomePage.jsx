@@ -1,5 +1,4 @@
 import { Link } from "react-router-dom";
-import ThemeToggle from "../components/ThemeToggle";
 import { useAuth } from "../hooks/useAuth";
 import { ORGAOS } from "../data/organs";
 
@@ -73,7 +72,6 @@ export default function OrgansHomePage() {
       <div className="landing-shell">
         <header className="landing-header">
           <div className="landing-brand">
-            <ThemeToggle />
             <div className="landing-brand-copy">
               <span className="landing-badge">Painel Gov SC</span>
               <strong>Gestão de Terceirizados</strong>

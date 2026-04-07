@@ -1,7 +1,6 @@
 import { useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { useAuth } from "../hooks/useAuth";
-import ThemeToggle from "../components/ThemeToggle";
 import "../styles/Auth.css";
 
 const DOMAIN = "@sef.sc.gov.br";
@@ -72,7 +71,6 @@ export default function LoginPage() {
           <span className="auth-brand-dot" />
           <strong>Painel Gov SC</strong>
         </div>
-        <ThemeToggle />
       </div>
 
       <div className="auth-card">

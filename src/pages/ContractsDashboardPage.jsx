@@ -2,13 +2,11 @@ import { useEffect, useMemo, useState } from "react";
 import { NavLink, Route, Routes, useLocation, useParams } from "react-router-dom";
 import ContractsTable from "../components/ContractsTable";
 import TopBar from "../components/TopBar";
-import { useAuth } from "../hooks/useAuth";
 import { ORGAOS } from "../data/organs";
 import { buildContractGroups } from "../utils/contractGroups";
 import { normalizeText } from "../utils/textHelpers";
 import { loadSpreadsheetRecords } from "../utils/workbookImport";
 
-// Lista os contratos de um órgão.
 function ContractListSection({ groups, orgao }) {
   if (!orgao) return null;
   if (groups.length === 0) {
@@ -36,7 +34,6 @@ function ContractListSection({ groups, orgao }) {
   );
 }
 
-// Exibe os documentos de um contrato específico.
 function ContractDetailsSection({ groups, orgao, search }) {
   const { contractSlug } = useParams();
 
@@ -73,10 +70,8 @@ function ContractDetailsSection({ groups, orgao, search }) {
   );
 }
 
-// Página da dashboard operacional por órgão.
 export default function ContractsDashboardPage() {
   const { orgaoId } = useParams();
-  const { user, logout, isAdmin } = useAuth();
   const location = useLocation();
   const [records, setRecords] = useState([]);
   const [search, setSearch] = useState("");
@@ -95,7 +90,7 @@ export default function ContractsDashboardPage() {
         setRecords(nextRecords);
         setStatusMessage("");
       } catch {
-        setStatusMessage("Erro ao carregar planilha");
+        setStatusMessage("Erro ao carregar planilha.");
       }
     }
 
@@ -119,25 +114,20 @@ export default function ContractsDashboardPage() {
   return (
     <div className="dashboard-container">
       <TopBar title={currentOrgan?.nome}>
-        <button
-          type="button"
-          className={`hamburger-button${menuOpen ? " is-open" : ""}`}
-          aria-label={menuOpen ? "Fechar menu de órgãos" : "Abrir menu de órgãos"}
-          aria-expanded={menuOpen}
-          aria-controls="orgao-navigation"
-          onClick={() => setMenuOpen((open) => !open)}
-        >
-          <span />
-          <span />
-          <span />
-          <span style={{ marginLeft: "8px", fontSize: "12px", fontWeight: "600" }}>Órgãos</span>
-        </button>
-        {statusMessage && <span className="header-status" style={{ marginLeft: "12px" }}>{statusMessage}</span>}
+        {statusMessage && (
+          <span className="header-status" style={{ marginLeft: "12px" }}>
+            {statusMessage}
+          </span>
+        )}
       </TopBar>
 
       <div className={`menu-overlay${menuOpen ? " is-open" : ""}`} onClick={() => setMenuOpen(false)} />
 
-      <aside id="orgao-navigation" className={`mobile-menu${menuOpen ? " is-open" : ""}`} aria-label="Órgãos disponíveis">
+      <aside
+        id="orgao-navigation"
+        className={`mobile-menu${menuOpen ? " is-open" : ""}`}
+        aria-label="Órgãos disponíveis"
+      >
         <div className="mobile-menu-header">
           <div>
             <strong className="mobile-menu-title">Órgãos</strong>
@@ -176,7 +166,28 @@ export default function ContractsDashboardPage() {
         {statusMessage ? <span className="mobile-status">{statusMessage}</span> : null}
       </aside>
 
-      <main style={{ padding: "30px", maxWidth: "1300px", margin: "0 auto" }}>
+      <div className="contracts-top-actions">
+        <div className="contracts-top-actions-inner">
+          <button
+            type="button"
+            className={`hamburger-button hamburger-button-inline${menuOpen ? " is-open" : ""}`}
+            aria-label={menuOpen ? "Fechar menu de órgãos" : "Abrir menu de órgãos"}
+            aria-expanded={menuOpen}
+            aria-controls="orgao-navigation"
+            onClick={() => setMenuOpen((open) => !open)}
+          >
+            <span className="hamburger-button-glyph" aria-hidden="true">
+              <span />
+              <span />
+              <span />
+            </span>
+            <strong>Órgãos</strong>
+          </button>
+          {statusMessage ? <span className="contracts-toolbar-status">{statusMessage}</span> : null}
+        </div>
+      </div>
+
+      <main style={{ padding: "24px 30px 30px", maxWidth: "1300px", margin: "0 auto" }}>
         <div className="filter-bar" style={{ marginBottom: 16 }}>
           <input
             className="input-search"
