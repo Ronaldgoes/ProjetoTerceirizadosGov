@@ -86,6 +86,18 @@ export function mergeCusteioDataset(baseDataset, patch) {
     subelementos: mergeDimensionItems(baseDataset.subelementos, patch.subelementos),
     unidades: mergeDimensionItems(baseDataset.unidades, patch.unidades),
     facts: nextFacts,
+    ipcaMonthly: {
+      ...(baseDataset.ipcaMonthly || {}),
+      ...(patch.ipcaMonthly || {}),
+    },
+    ipcaAnnual: {
+      ...(baseDataset.ipcaAnnual || {}),
+      ...(patch.ipcaAnnual || {}),
+    },
+    ipcaSourceSummary: {
+      ...(baseDataset.ipcaSourceSummary || {}),
+      ...(patch.ipcaSourceSummary || {}),
+    },
     sourceSummary: {
       ...(baseDataset.sourceSummary || {}),
       ...(patch.sourceSummary || {}),

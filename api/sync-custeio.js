@@ -1,5 +1,6 @@
 import fs from "node:fs/promises";
 import path from "node:path";
+import { fetchIpcaSeries } from "../src/utils/ipcaSeries.js";
 
 const CACHE_FILE = path.join(process.cwd(), "public", "data", "custeio-oficial.json");
 const API_URL = "https://api-portal-transparencia.apps.sm.okd4.ciasc.sc.gov.br/api";
@@ -313,6 +314,21 @@ export default async function handler(req, res) {
     }
 
     const patch = buildPatch(records, refreshedPeriods, fetchedPeriods, missingPeriods);
+
+    try {
+      const ipcaSeries = await fetchIpcaSeries();
+      patch.ipcaMonthly = ipcaSeries.monthly;
+      patch.ipcaAnnual = ipcaSeries.annual;
+      patch.ipcaSourceSummary = ipcaSeries.sourceSummary;
+    } catch (error) {
+      patch.ipcaMonthly = cache?.ipcaMonthly || {};
+      patch.ipcaAnnual = cache?.ipcaAnnual || {};
+      patch.ipcaSourceSummary = {
+        ...(cache?.ipcaSourceSummary || {}),
+        lastError: error instanceof Error ? error.message : "Falha ao atualizar IPCA automaticamente.",
+      };
+    }
+
     return json(res, 200, { ok: true, cachePatch: patch });
   } catch (error) {
     return json(res, 500, {

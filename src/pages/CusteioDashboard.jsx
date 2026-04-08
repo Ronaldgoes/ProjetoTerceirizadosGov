@@ -29,7 +29,7 @@ const PAGE_TABS = [
 
 const MONTH_SHORT_LABELS = ["Jan", "Fev", "Mar", "Abr", "Mai", "Jun", "Jul", "Ago", "Set", "Out", "Nov", "Dez"];
 
-const IPCA_ANUAL = {
+const IPCA_ANUAL_FALLBACK = {
   2021: 10.06,
   2022: 5.79,
   2023: 4.62,
@@ -38,7 +38,7 @@ const IPCA_ANUAL = {
   2026: 1.03,
 };
 
-const IPCA_MENSAL = {
+const IPCA_MENSAL_FALLBACK = {
   "2021-01": 0.25,
   "2021-02": 0.86,
   "2021-03": 0.93,
@@ -915,7 +915,15 @@ function PeriodBars({ items, metricLabel, title, valueKey = "year" }) {
   );
 }
 
-function VariationTable({ rows, title = "Variação Anual", periodLabel = "Ano", valueKey = "year", showIPCA = false }) {
+function VariationTable({
+  rows,
+  title = "Variação Anual",
+  periodLabel = "Ano",
+  valueKey = "year",
+  showIPCA = false,
+  ipcaAnnual = IPCA_ANUAL_FALLBACK,
+  ipcaMonthly = IPCA_MENSAL_FALLBACK,
+}) {
   const getDissonanceEmoji = (color) => {
     if (color === "positive") return "😊";
     if (color === "warning") return "😐";
@@ -924,14 +932,14 @@ function VariationTable({ rows, title = "Variação Anual", periodLabel = "Ano",
   };
 
   const withVariation = rows.map((current, index) => {
-    const previous = rows[index - 1];
-    const variation = previous?.value ? ((current.value - previous.value) / previous.value) * 100 : Number.NaN;
-    const rawIpcaValue =
-      showIPCA && valueKey === "year"
-        ? IPCA_ANUAL[String(current[valueKey]).substring(0, 4)]
-        : showIPCA && valueKey === "period"
-          ? IPCA_MENSAL[String(current[valueKey])]
-          : null;
+      const previous = rows[index - 1];
+      const variation = previous?.value ? ((current.value - previous.value) / previous.value) * 100 : Number.NaN;
+      const rawIpcaValue =
+        showIPCA && valueKey === "year"
+          ? ipcaAnnual[String(current[valueKey]).substring(0, 4)]
+          : showIPCA && valueKey === "period"
+            ? ipcaMonthly[String(current[valueKey])]
+            : null;
     const ipcaValue = Number.isFinite(rawIpcaValue) ? rawIpcaValue : null;
     const dissonance = ipcaValue !== null && !Number.isNaN(variation) ? variation - ipcaValue : null;
 
@@ -1699,6 +1707,16 @@ export default function CusteioDashboard() {
     return metric?.label || "";
   }, [selectedMetric]);
 
+  const ipcaAnnual = useMemo(() => {
+    const series = dataset?.ipcaAnnual;
+    return series && Object.keys(series).length > 0 ? series : IPCA_ANUAL_FALLBACK;
+  }, [dataset]);
+
+  const ipcaMonthly = useMemo(() => {
+    const series = dataset?.ipcaMonthly;
+    return series && Object.keys(series).length > 0 ? series : IPCA_MENSAL_FALLBACK;
+  }, [dataset]);
+
   const currentMetricNoun = useMemo(() => {
     if (selectedMetric === "vlempenhado") return "Empenhamento";
     if (selectedMetric === "vlliquidado") return "Liquidação";
@@ -2353,10 +2371,10 @@ export default function CusteioDashboard() {
 
         {activeTab === "overview" && (
           <>
-            <section className="bi-grid bi-grid-main">
-              <AnnualBars items={yearlyVisibleTotals} metricLabel={currentMetricLabel} />
-              <VariationTable rows={yearlyVisibleTotals} showIPCA />
-            </section>
+              <section className="bi-grid bi-grid-main">
+                <AnnualBars items={yearlyVisibleTotals} metricLabel={currentMetricLabel} />
+                <VariationTable rows={yearlyVisibleTotals} showIPCA ipcaAnnual={ipcaAnnual} ipcaMonthly={ipcaMonthly} />
+              </section>
             <section className="bi-grid">
               <TopRankingPanel title={`10 UGs com Maior Valor ${currentMetricLabel}`} items={topUnidades} />
               <TopRankingPanel title={`10 Subelementos com Maior Valor ${currentMetricLabel}`} items={topSubelementos} />
@@ -2379,13 +2397,15 @@ export default function CusteioDashboard() {
           <>
             <section className="bi-grid bi-grid-main">
               <PeriodBars items={monthlyVariationRows} metricLabel={currentMetricLabel} title="Série mensal" valueKey="period" />
-              <VariationTable
-                rows={monthlyVariationRows}
-                title="Variação mensal"
-                periodLabel="Mês"
-                valueKey="period"
-                showIPCA
-              />
+                <VariationTable
+                  rows={monthlyVariationRows}
+                  title="Variação mensal"
+                  periodLabel="Mês"
+                  valueKey="period"
+                  showIPCA
+                  ipcaAnnual={ipcaAnnual}
+                  ipcaMonthly={ipcaMonthly}
+                />
             </section>
             <section className="bi-grid">
               <MonthlySummaryPanel

@@ -1,6 +1,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { fetchIpcaSeries } from "../src/utils/ipcaSeries.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(__dirname, "..");
@@ -288,6 +289,15 @@ const output = {
     record.vlpago,
   ]),
 };
+
+try {
+  const ipcaSeries = await fetchIpcaSeries();
+  output.ipcaMonthly = ipcaSeries.monthly;
+  output.ipcaAnnual = ipcaSeries.annual;
+  output.ipcaSourceSummary = ipcaSeries.sourceSummary;
+} catch (error) {
+  console.warn(`Aviso: falha ao atualizar IPCA automaticamente: ${error instanceof Error ? error.message : String(error)}`);
+}
 
 await fs.writeFile(outFile, JSON.stringify(output));
 console.log(`Cache gerado em ${outFile} com ${aggregatedRecords.length} registros agregados.`);
