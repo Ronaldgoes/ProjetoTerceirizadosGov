@@ -398,6 +398,8 @@
   display: flex;
   flex-direction: column;
   gap: 24px;
+  align-items: center;
+  text-align: center;
 }
 
 .bi-hero h1 {
@@ -414,7 +416,7 @@
   color: #94A3B8;
   line-height: 1.6;
   max-width: 50ch;
-  margin: 0;
+  margin: 0 auto;
 }
 
 .bi-filters-container {
@@ -1885,7 +1887,7 @@
 
 .bi-hero p {
   max-width: 62ch;
-  margin: 0;
+  margin: 0 auto;
   color: #94A3B8;
   line-height: 1.7;
 }

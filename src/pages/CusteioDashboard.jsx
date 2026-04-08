@@ -141,18 +141,22 @@ function aggregateBy(records, key, metricKey, limit = 10, groupOthers = false) {
   const sorted = [...totals.entries()]
     .map(([label, value]) => ({ label, value }))
     .sort((a, b) => b.value - a.value);
+  const totalGroups = sorted.length;
 
   if (!groupOthers || sorted.length <= limit) {
-    return sorted.slice(0, limit);
+    const result = sorted.slice(0, limit);
+    result.totalGroups = totalGroups;
+    return result;
   }
 
   const top = sorted.slice(0, limit);
   const othersValue = sorted.slice(limit).reduce((acc, item) => acc + item.value, 0);
-
-  return [
+  const result = [
     ...top,
     { label: "Outras Despesas", value: othersValue },
   ];
+  result.totalGroups = totalGroups;
+  return result;
 }
 
 function buildPieSegments(items, selectedLabels = null, primaryLabel = null) {
@@ -289,6 +293,7 @@ function BarList({ title, items, onClickItem, selectedItem, limitHeight = false 
 
 function TopRankingPanel({ title, items, limit = 10 }) {
   const displayedItems = items.slice(0, limit);
+  const totalItems = items.totalGroups ?? items.length;
 
   return (
     <section className="bi-panel">
@@ -306,9 +311,9 @@ function TopRankingPanel({ title, items, limit = 10 }) {
             </div>
           </article>
         ))}
-        {items.length > limit && (
+        {totalItems > limit && (
           <div className="bi-ranking-footer">
-            Exibindo top {limit} de {items.length} itens.
+            Exibindo top {limit} de {totalItems} itens.
           </div>
         )}
       </div>
@@ -605,7 +610,7 @@ function TopUgTrendLinesPanel({
               <strong>{overview.focusPeriod?.fullLabel || "--"}</strong>
             </div>
             <div className="bi-evolution-kpi">
-              <span>UG líder</span>
+              <span>UG dominante</span>
               <strong>{overview.leader?.label || "--"}</strong>
             </div>
             <div className="bi-evolution-kpi">
@@ -786,7 +791,7 @@ function TopUgTrendLinesPanel({
             </div>
           </div>
           <div className="bi-evolution-footnote">
-            <span>{isMonthlySeries ? "Rolagem horizontal liberada para acomodar todos os meses." : "Visão anual consolidada das 10 UGs líderes."}</span>
+            <span>{isMonthlySeries ? "Rolagem horizontal liberada para acomodar todos os meses." : "Visão anual consolidada das 10 UGs dominantes."}</span>
             <span>{activePeriodLabel ? `Foco atual: ${activePeriodLabel}` : "Sem foco travado"}</span>
           </div>
           </div>
@@ -2048,7 +2053,7 @@ export default function CusteioDashboard() {
     return [
       { label: "Ano de Maior Valor na Seleção", value: bestYear ? `${bestYear.year}` : "--" },
       { label: `Total da ${currentMetricLabel}`, value: fmtCurrency(accumulated) },
-      { label: "UG Líder", value: topUnidades[0]?.label || "--" },
+      { label: "UG Dominante", value: topUnidades[0]?.label || "--" },
       { label: "Subelemento Dominante", value: topSubelementos[0]?.label || "--" },
       { label: "Elemento Dominante", value: topElementos[0]?.label || "--" },
     ];
@@ -2075,7 +2080,7 @@ export default function CusteioDashboard() {
     return [
       { label: "Mês de Maior Gasto na Seleção", value: formatPeriodLabel(topMonth.period) },
       { label: "Total no Mês de Maior Gasto", value: fmtCurrency(topMonthDetails.total) },
-      { label: "UG Líder no Mês", value: topMonthDetails.unit },
+      { label: "UG Dominante no Mês", value: topMonthDetails.unit },
       { label: "Subelemento Dominante no Mês", value: topMonthDetails.sub },
       { label: "Elemento Dominante no Mês", value: topMonthDetails.elem },
     ];
@@ -2089,7 +2094,12 @@ export default function CusteioDashboard() {
       const previous = monthlyVariationRows[index - 1];
       const delta = previous?.value ? current.value - previous.value : 0;
       const pct = previous?.value ? (delta / previous.value) * 100 : 0;
-      return { ...current, delta, pct, prevLabel: previous?.label || "--" };
+      return {
+        ...current,
+        delta,
+        pct,
+        prevLabel: previous?.period ? formatPeriodLabel(previous.period) : "--",
+      };
     });
     
     // Sort by absolute variation to find the most significant change
@@ -2114,7 +2124,7 @@ export default function CusteioDashboard() {
       },
       { label: "Variação em Valor", value: fmtCurrency(topVarMonth.delta) },
       { label: "Variação em Percentual", value: fmtPercent(topVarMonth.pct) },
-      { label: "UG Líder na Variação", value: topVarDetails.unit },
+      { label: "UG Dominante na Variação", value: topVarDetails.unit },
       { label: "Subelemento na Variação", value: topVarDetails.sub },
     ];
   }, [monthlyVariationRows, selectedMetric, visibleRecords]);
