@@ -333,6 +333,7 @@
   flex-direction: column;
   position: relative;
   overflow: hidden;
+  padding-top: 88px;
 }
 
 .monitoring-topbar {
@@ -536,6 +537,10 @@
 }
 
 @media (max-width: 980px) {
+  .monitoring-page {
+    padding-top: 116px;
+  }
+
   .admin-users-header {
     flex-direction: column;
   }
@@ -551,6 +556,15 @@
 
   .admin-users-row--head {
     display: none;
+  }
+
+  .monitoring-layout {
+    min-height: calc(100vh - 116px);
+  }
+
+  .monitoring-date-grid,
+  .monitor-date-range {
+    grid-template-columns: 1fr;
   }
 }
 
@@ -585,7 +599,7 @@
   display: grid;
   grid-template-columns: 380px 1fr;
   flex: 1;
-  height: calc(100vh - 57px);
+  min-height: calc(100vh - 88px);
 }
 
 .monitoring-sidebar {
@@ -680,6 +694,52 @@
 
 [data-theme="light"] .monitoring-search { color: #1E293B; }
 .monitoring-search::placeholder { color: #64748B; }
+
+.monitoring-date-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.monitoring-date-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.monitoring-date-field label {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: #64748B;
+}
+
+.monitoring-date-field input,
+.monitor-date-range input {
+  width: 100%;
+  min-width: 0;
+  padding: 9px 10px;
+  border-radius: 10px;
+  border: 1px solid var(--border-color);
+  background: rgba(0,0,0,0.18);
+  color: var(--text-main);
+  font-size: 12px;
+  outline: none;
+}
+
+.monitoring-date-field input:focus,
+.monitor-date-range input:focus {
+  border-color: var(--accent-blue);
+  box-shadow: 0 0 0 3px rgba(14,165,233,0.12);
+}
+
+[data-theme="light"] .monitoring-date-field input,
+[data-theme="light"] .monitor-date-range input {
+  background: #F8FAFC;
+  border-color: #CBD5E1;
+  color: #1E293B;
+}
 
 .monitoring-options-list {
   flex: 1;
@@ -956,6 +1016,19 @@
   accent-color: var(--accent-blue);
 }
 
+.monitor-date-range {
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
+  gap: 8px;
+  align-items: center;
+}
+
+.monitor-date-range span {
+  font-size: 11px;
+  font-weight: 600;
+  color: #64748B;
+}
+
 
 /* ── NOTIFICATION BELL ──────────────────────────────── */
 .bell-wrap {
@@ -1153,6 +1226,21 @@
   display: flex;
   align-items: center;
   gap: 8px;
+}
+
+.bell-item-range {
+  font-size: 10px;
+  color: #94A3B8;
+}
+
+.bell-item-summary {
+  font-size: 11px;
+  line-height: 1.55;
+  color: var(--text-main);
+}
+
+[data-theme="light"] .bell-item-summary {
+  color: #334155;
 }
 
 .bell-metric {

@@ -2595,6 +2595,14 @@
   white-space: nowrap;
 }
 
+.bi-dissonance-emoji {
+  display: inline-block;
+  margin-left: 0.32rem;
+  font-size: 1.28rem;
+  line-height: 1;
+  vertical-align: -0.14em;
+}
+
 .bi-table-row > span:last-child {
   justify-self: end;
   text-align: right;

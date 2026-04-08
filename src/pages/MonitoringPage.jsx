@@ -11,6 +11,7 @@ import { v4 as uuidv4 } from "uuid";
 import TopBar from "../components/TopBar";
 import { useAuth } from "../hooks/useAuth";
 import { db } from "../config/firebase";
+import { loadCusteioSyncPatch, mergeCusteioDataset } from "../utils/custeioSyncSession";
 import "../styles/Auth.css";
 
 const METRICS = [
@@ -46,6 +47,34 @@ function monitorMatchesFact(fact, monitor) {
   return false;
 }
 
+function currentBrazilDateISO() {
+  const formatter = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "America/Sao_Paulo",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  });
+  const parts = formatter.formatToParts(new Date());
+  const year = parts.find((part) => part.type === "year")?.value;
+  const month = parts.find((part) => part.type === "month")?.value;
+  const day = parts.find((part) => part.type === "day")?.value;
+  return `${year}-${month}-${day}`;
+}
+
+function factPeriodKey(fact) {
+  return `${fact[0]}-${String(fact[1]).padStart(2, "0")}`;
+}
+
+function monitorRangeIncludesFact(fact, monitor) {
+  const period = factPeriodKey(fact);
+  const startPeriod = monitor.startDate ? monitor.startDate.slice(0, 7) : null;
+  const endPeriod = monitor.endDate ? monitor.endDate.slice(0, 7) : null;
+
+  if (startPeriod && period < startPeriod) return false;
+  if (endPeriod && period > endPeriod) return false;
+  return true;
+}
+
 export default function MonitoringPage() {
   const { user, logout } = useAuth();
 
@@ -54,6 +83,8 @@ export default function MonitoringPage() {
   const [activeType, setActiveType]   = useState("orgao");
   const [search, setSearch]           = useState("");
   const [saving, setSaving]           = useState(false);
+  const [draftStartDate, setDraftStartDate] = useState("2021-01-01");
+  const [draftEndDate, setDraftEndDate] = useState(currentBrazilDateISO());
 
   const docRef = user ? doc(db, "users", user.uid, "monitors", "list") : null;
 
@@ -61,7 +92,10 @@ export default function MonitoringPage() {
   useEffect(() => {
     fetch("/data/custeio-oficial.json")
       .then((r) => r.json())
-      .then(setCusteioData)
+      .then((data) => {
+        const patch = loadCusteioSyncPatch();
+        setCusteioData(patch ? mergeCusteioDataset(data, patch) : data);
+      })
       .catch(() => {});
   }, []);
 
@@ -110,7 +144,9 @@ export default function MonitoringPage() {
 
     monitors.forEach((monitor) => {
       const metricIndex = METRIC_FACT_INDEX[monitor.metric] ?? 7;
-      const relevantFacts = facts.filter((fact) => monitorMatchesFact(fact, monitor));
+      const relevantFacts = facts.filter(
+        (fact) => monitorMatchesFact(fact, monitor) && monitorRangeIncludesFact(fact, monitor)
+      );
 
       if (!relevantFacts.length) {
         nextValues[monitor.id] = { value: 0, period: "--" };
@@ -144,6 +180,8 @@ export default function MonitoringPage() {
       label:     item.label,
       threshold: 15,
       metric:    "pago",
+      startDate: draftStartDate,
+      endDate:   draftEndDate,
     };
     setSaving(true);
     await setDoc(docRef, { items: arrayUnion(newItem) }, { merge: true });
@@ -210,6 +248,27 @@ export default function MonitoringPage() {
             />
           </div>
 
+          <div className="monitoring-date-grid">
+            <div className="monitoring-date-field">
+              <label htmlFor="monitor-start-date">Data inicial</label>
+              <input
+                id="monitor-start-date"
+                type="date"
+                value={draftStartDate}
+                onChange={(e) => setDraftStartDate(e.target.value)}
+              />
+            </div>
+            <div className="monitoring-date-field">
+              <label htmlFor="monitor-end-date">Data final</label>
+              <input
+                id="monitor-end-date"
+                type="date"
+                value={draftEndDate}
+                onChange={(e) => setDraftEndDate(e.target.value)}
+              />
+            </div>
+          </div>
+
           {/* Lista de opções */}
           <div className="monitoring-options-list">
             {!custeioData && (
@@ -273,6 +332,9 @@ export default function MonitoringPage() {
                       <div className="monitor-card-current-period">
                         Referência: {currentValuesByMonitor[mon.id]?.period || "--"}
                       </div>
+                      <div className="monitor-card-current-period">
+                        Intervalo: {mon.startDate || "--"} até {mon.endDate || "--"}
+                      </div>
                     </div>
                     <button
                       type="button"
@@ -322,6 +384,23 @@ export default function MonitoringPage() {
                           onChange={(e) => updateMonitor(mon, "threshold", Number(e.target.value))}
                         />
                         <span>100%</span>
+                      </div>
+                    </div>
+
+                    <div className="monitor-field">
+                      <label>Período monitorado</label>
+                      <div className="monitor-date-range">
+                        <input
+                          type="date"
+                          value={mon.startDate || ""}
+                          onChange={(e) => updateMonitor(mon, "startDate", e.target.value)}
+                        />
+                        <span>até</span>
+                        <input
+                          type="date"
+                          value={mon.endDate || ""}
+                          onChange={(e) => updateMonitor(mon, "endDate", e.target.value)}
+                        />
                       </div>
                     </div>
                   </div>

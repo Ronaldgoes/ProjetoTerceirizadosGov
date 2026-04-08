@@ -16,15 +16,44 @@ function fmt(val) {
   }).format(val);
 }
 
+function formatPeriodLabel(period) {
+  if (!period) return "período recente";
+  const [year, month] = String(period).split("-").map(Number);
+  if (!year || !month) return String(period);
+
+  return new Intl.DateTimeFormat("pt-BR", {
+    month: "long",
+    year: "numeric",
+    timeZone: "America/Sao_Paulo",
+  }).format(new Date(Date.UTC(year, month - 1, 1)));
+}
+
+function metricText(metric) {
+  if (metric === "pago") return "pagamento";
+  if (metric === "liquidado") return "liquidação";
+  if (metric === "empenhado") return "empenhamento";
+  return metric || "despesa";
+}
+
+function buildAlertSummary(alert) {
+  if (alert.summary) return alert.summary;
+
+  const direction = alert.change >= 0 ? "aumentou" : "reduziu";
+  const currentPeriod = alert.periodLabel || formatPeriodLabel(alert.period);
+  const previousPeriod = alert.prevPeriodLabel || formatPeriodLabel(alert.prevPeriod);
+  const metric = alert.metricLabel || metricText(alert.metric);
+
+  return `Em ${currentPeriod}, ${alert.label} ${direction} ${Math.abs(alert.change)}% em ${metric}, saindo de ${fmt(alert.from)} para ${fmt(alert.to)} em relação a ${previousPeriod}.`;
+}
+
 export default function NotificationBell() {
-  const { user }          = useAuth();
-  const alerts            = useAlertsSnapshot();
-  const [open, setOpen]   = useState(false);
-  const panelRef          = useRef(null);
+  const { user } = useAuth();
+  const alerts = useAlertsSnapshot();
+  const [open, setOpen] = useState(false);
+  const panelRef = useRef(null);
 
   const unread = alerts.filter((a) => !a.read);
 
-  // Fecha ao clicar fora
   useEffect(() => {
     function handler(e) {
       if (panelRef.current && !panelRef.current.contains(e.target)) setOpen(false);
@@ -89,7 +118,7 @@ export default function NotificationBell() {
                       >
                         {alert.change >= 0 ? "▲" : "▼"} {Math.abs(alert.change)}%
                       </span>
-                      <span className="bell-period">{alert.period}</span>
+                      <span className="bell-period">{alert.periodLabel || alert.period}</span>
                       {!alert.read && (
                         <button
                           type="button"
@@ -103,9 +132,13 @@ export default function NotificationBell() {
                     </div>
                     <div className="bell-item-label">{alert.label}</div>
                     <div className="bell-item-detail">
-                      <span className="bell-metric">{alert.metric}</span>
+                      <span className="bell-metric">{alert.metricLabel || alert.metric}</span>
                       {fmt(alert.from)} → {fmt(alert.to)}
                     </div>
+                    {alert.rangeLabel && (
+                      <div className="bell-item-range">Período monitorado: {alert.rangeLabel}</div>
+                    )}
+                    <div className="bell-item-summary">{buildAlertSummary(alert)}</div>
                     <div className="bell-item-footer">
                       <Link
                         to="/analise-custeio"

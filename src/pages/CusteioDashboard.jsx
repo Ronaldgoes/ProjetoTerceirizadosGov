@@ -974,7 +974,14 @@ function VariationTable({ rows, title = "Variação Anual", periodLabel = "Ano",
             {showIPCA && (
               <span className={`bi-table-subtext ${row.dissonanceColor}`}>
                 {Number.isFinite(row.dissonance)
-                  ? `${row.dissonance.toFixed(2)} ${getDissonanceEmoji(row.dissonanceColor)}`.trim()
+                  ? (
+                    <>
+                      {row.dissonance.toFixed(2)}
+                      <span className="bi-dissonance-emoji" aria-hidden="true">
+                        {getDissonanceEmoji(row.dissonanceColor)}
+                      </span>
+                    </>
+                  )
                   : "--"}
               </span>
             )}
