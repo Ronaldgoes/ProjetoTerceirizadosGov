@@ -1,5 +1,6 @@
 ﻿import { useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router-dom";
+import { useCallback } from "react";
 import MatrixPanelView from "../components/MatrixPanel";
 import TopBar from "../components/TopBar";
 import { CUSTEIO_DATA_CONTRACT } from "../config/custeioDataContract";
@@ -33,7 +34,7 @@ const IPCA_ANUAL = {
   2023: 4.62,
   2024: 4.83,
   2025: 4.26,
-  2026: 0.33,
+  2026: 1.03,
 };
 
 const IPCA_MENSAL = {
@@ -98,6 +99,7 @@ const IPCA_MENSAL = {
   "2025-11": 0.18,
   "2025-12": 0.33,
   "2026-01": 0.33,
+  "2026-02": 0.70,
 };
 
 const fmtCurrency = (value) =>
@@ -908,6 +910,13 @@ function PeriodBars({ items, metricLabel, title, valueKey = "year" }) {
 }
 
 function VariationTable({ rows, title = "Variação Anual", periodLabel = "Ano", valueKey = "year", showIPCA = false }) {
+  const getDissonanceEmoji = (color) => {
+    if (color === "positive") return "😊";
+    if (color === "warning") return "😐";
+    if (color === "negative") return "😢";
+    return "";
+  };
+
   const withVariation = rows.map((current, index) => {
     const previous = rows[index - 1];
     const variation = previous?.value ? ((current.value - previous.value) / previous.value) * 100 : Number.NaN;
@@ -963,7 +972,9 @@ function VariationTable({ rows, title = "Variação Anual", periodLabel = "Ano",
             )}
             {showIPCA && (
               <span className={`bi-table-subtext ${row.dissonanceColor}`}>
-                {Number.isFinite(row.dissonance) ? `${row.dissonance.toFixed(2)} p.p.` : "--"}
+                {Number.isFinite(row.dissonance)
+                  ? `${row.dissonance.toFixed(2)} ${getDissonanceEmoji(row.dissonanceColor)}`.trim()
+                  : "--"}
               </span>
             )}
           </div>
@@ -972,6 +983,34 @@ function VariationTable({ rows, title = "Variação Anual", periodLabel = "Ano",
     </section>
   );
 }
+
+function parseDateInputToPeriodKey(value) {
+  if (!value) return "all";
+
+  const normalized = String(value).trim();
+  const match = normalized.match(/^(\d{2})\/(\d{2})\/(\d{4})$/);
+  if (!match) return "all";
+
+  const [, dayText, monthText, yearText] = match;
+  const day = Number(dayText);
+  const month = Number(monthText);
+  const year = Number(yearText);
+
+  if (!Number.isInteger(day) || !Number.isInteger(month) || !Number.isInteger(year)) return "all";
+  if (year < 1000 || month < 1 || month > 12 || day < 1 || day > 31) return "all";
+
+  const candidateDate = new Date(year, month - 1, day);
+  if (
+    candidateDate.getFullYear() !== year ||
+    candidateDate.getMonth() !== month - 1 ||
+    candidateDate.getDate() !== day
+  ) {
+    return "all";
+  }
+
+  return `${yearText}-${monthText}`;
+}
+
 function MatrixPanel({ title, rows, years, matrixSearch, onMatrixSearch }) {
   return (
     <section className="bi-panel">
@@ -1341,9 +1380,13 @@ function AlertTable({ title, rows, baseLabel, compareLabel, emptyMessage, totalV
 }
 
 export default function CusteioDashboard() {
-  useAuth();
+  const { user } = useAuth();
+  const fixedPeriodStartInput = "01/01/2021";
+  const currentDateInput = new Intl.DateTimeFormat("pt-BR", {
+    timeZone: "America/Sao_Paulo",
+  }).format(new Date());
   const [dataset, setDataset] = useState(null);
-  const [lastManualUpdate, setLastManualUpdate] = useState(null);
+  const [lastSyncAt, setLastSyncAt] = useState(null);
   const [status, setStatus] = useState("Carregando painel...");
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [refreshInfo, setRefreshInfo] = useState("");
@@ -1354,8 +1397,8 @@ export default function CusteioDashboard() {
   const [selectedUnidades, setSelectedUnidades] = useState([]);
   const [selectedSubelementInRanking, setSelectedSubelementInRanking] = useState(null);
   const [selectedUgInRanking, setSelectedUgInRanking] = useState(null);
-  const [selectedPeriodStart, setSelectedPeriodStart] = useState("all");
-  const [selectedPeriodEnd, setSelectedPeriodEnd] = useState("all");
+  const [selectedPeriodStartInput, setSelectedPeriodStartInput] = useState(fixedPeriodStartInput);
+  const [selectedPeriodEndInput, setSelectedPeriodEndInput] = useState(currentDateInput);
   const [selectedRankingPeriod, setSelectedRankingPeriod] = useState(null);
   const [selectedEvolutionUg, setSelectedEvolutionUg] = useState(null);
   const [evolutionType, setEvolutionType] = useState("monthly");
@@ -1372,28 +1415,7 @@ export default function CusteioDashboard() {
   const [unidadeSearch, setUnidadeSearch] = useState("");
   const deferredMatrixSearch = useDeferredValue(matrixSearch);
 
-  useEffect(() => {
-    const loadDashboard = async () => {
-      try {
-        const response = await fetch(`${CUSTEIO_DATA_SOURCE.cache.aggregatedJson}?t=${Date.now()}`);
-        if (!response.ok) {
-          throw new Error(`Falha ao carregar ${CUSTEIO_DATA_SOURCE.cache.aggregatedJson}: ${response.status}`);
-        }
-
-        const officialCache = await response.json();
-        setDataset(officialCache);
-        setStatus("");
-      } catch (error) {
-        setStatus(error instanceof Error ? error.message : "Não foi possível carregar os dados do painel de custeio.");
-      } finally {
-        setIsRefreshing(false);
-      }
-    };
-
-    loadDashboard();
-  }, []);
-
-  const refreshDashboard = async () => {
+  const refreshDashboard = useCallback(async () => {
     try {
       setIsRefreshing(true);
       setRefreshInfo("");
@@ -1424,11 +1446,13 @@ export default function CusteioDashboard() {
 
       const officialCache = await response.json();
       setDataset(officialCache);
-      setLastManualUpdate(new Date());
+      if (syncCompleted) {
+        setLastSyncAt(new Date());
+      }
       setStatus("");
       setRefreshInfo(
         syncCompleted
-          ? "Base oficial sincronizada com o Portal da Transparência e painel recarregado."
+          ? "Base oficial sincronizada automaticamente com o Portal da Transparência."
           : "Painel recarregado com a base oficial publicada disponível."
       );
     } catch (error) {
@@ -1436,11 +1460,16 @@ export default function CusteioDashboard() {
     } finally {
       setIsRefreshing(false);
     }
-  };
+  }, []);
+
+  useEffect(() => {
+    if (!user) return;
+    refreshDashboard();
+  }, [refreshDashboard, user]);
 
   const updatedAtLabel = useMemo(() => {
-    const baseDate = dataset?.generatedAt ? new Date(dataset.generatedAt) : null;
-    const dateToUse = lastManualUpdate || baseDate;
+    const baseDate = dataset?.syncedAt ? new Date(dataset.syncedAt) : dataset?.generatedAt ? new Date(dataset.generatedAt) : null;
+    const dateToUse = lastSyncAt || baseDate;
 
     if (!dateToUse) return "Cache local";
 
@@ -1448,7 +1477,31 @@ export default function CusteioDashboard() {
       dateStyle: "short",
       timeStyle: "short",
     }).format(dateToUse);
-  }, [dataset, lastManualUpdate]);
+  }, [dataset, lastSyncAt]);
+
+  const latestPortalPeriodLabel = useMemo(() => {
+    const latestPeriodKey = dataset?.sourceSummary?.latestPeriodAvailable;
+    if (!latestPeriodKey) return "Não identificado";
+
+    const periodLabel = dataset?.periodLabels?.[latestPeriodKey];
+    return periodLabel ? `${periodLabel}/${latestPeriodKey.slice(0, 4)}` : latestPeriodKey;
+  }, [dataset]);
+
+  const syncCoverageLabel = useMemo(() => {
+    const requested = dataset?.sourceSummary?.requestedPeriodsCount;
+    const fetched = dataset?.sourceSummary?.fetchedPeriodsCount;
+    const missing = dataset?.sourceSummary?.missingPeriodsCount;
+
+    if (!Number.isFinite(requested) || !Number.isFinite(fetched)) return "Cobertura da base não informada";
+    if (missing > 0) return `${fetched}/${requested} consultas ao portal concluídas, ${missing} pendente(s)`;
+    return `${fetched}/${requested} consultas ao portal concluídas`;
+  }, [dataset]);
+
+  const aggregatedRecordsLabel = useMemo(() => {
+    const recordsCount = dataset?.sourceSummary?.recordsAggregated ?? dataset?.facts?.length;
+    if (!Number.isFinite(recordsCount)) return "Registros agregados não informados";
+    return `${new Intl.NumberFormat("pt-BR").format(recordsCount)} registros agregados`;
+  }, [dataset]);
 
   const dimensionLookup = useMemo(() => {
     if (!dataset) {
@@ -1519,16 +1572,15 @@ export default function CusteioDashboard() {
     [records]
   );
 
-  const periodOptions = useMemo(() => {
-    if (!records.length) return [];
+  const selectedPeriodStart = useMemo(
+    () => parseDateInputToPeriodKey(selectedPeriodStartInput),
+    [selectedPeriodStartInput]
+  );
 
-    return [...new Set(records.map((record) => record.periodKey))]
-      .sort((a, b) => a.localeCompare(b))
-      .map((periodKey) => ({
-        value: periodKey,
-        label: `${periodKey} - ${dataset?.periodLabels?.[periodKey] || periodKey}`,
-      }));
-  }, [dataset, records]);
+  const selectedPeriodEnd = useMemo(
+    () => parseDateInputToPeriodKey(selectedPeriodEndInput),
+    [selectedPeriodEndInput]
+  );
 
   const dimensionOptions = useMemo(() => {
     if (!dataset) return { elementos: [], subelementos: [], unidades: [] };
@@ -2059,8 +2111,8 @@ export default function CusteioDashboard() {
     setSelectedUnidades([]);
     setSelectedSubelementInRanking(null);
     setSelectedUgInRanking(null);
-    setSelectedPeriodStart("all");
-    setSelectedPeriodEnd("all");
+    setSelectedPeriodStartInput(fixedPeriodStartInput);
+    setSelectedPeriodEndInput(currentDateInput);
     setSelectedRankingPeriod(null);
     setSelectedEvolutionUg(null);
     setAlertThreshold(10);
@@ -2109,10 +2161,12 @@ export default function CusteioDashboard() {
     <div className="bi-dashboard">
       <TopBar title="Monitoramento do Custeio">
         <div className="bi-refresh-stack">
-          <button type="button" className="bi-refresh-button" onClick={refreshDashboard} disabled={isRefreshing}>
-            {isRefreshing ? "Sincronizando..." : "Sincronizar com Portal"}
-          </button>
-          <span className="bi-topbar-status">Última atualização: {updatedAtLabel}</span>
+          <span className="bi-topbar-status">
+            {isRefreshing ? "Sincronizando automaticamente com o portal..." : `Última sincronização: ${updatedAtLabel}`}
+          </span>
+          <span className="bi-topbar-status">Base do portal até: {latestPortalPeriodLabel}</span>
+          <span className="bi-topbar-status">{syncCoverageLabel}</span>
+          <span className="bi-topbar-status">{aggregatedRecordsLabel}</span>
           {refreshInfo ? <span className="bi-topbar-status">{refreshInfo}</span> : null}
         </div>
       </TopBar>
@@ -2162,26 +2216,28 @@ export default function CusteioDashboard() {
 
             <div className="bi-filter-group">
               <label htmlFor="period-start">Período Inicial</label>
-              <select id="period-start" value={selectedPeriodStart} onChange={(e) => setSelectedPeriodStart(e.target.value)}>
-                <option value="all">Desde o Início</option>
-                {periodOptions.map((option) => (
-                  <option key={option.value} value={option.value}>
-                    {option.label}
-                  </option>
-                ))}
-              </select>
+              <input
+                id="period-start"
+                type="text"
+                inputMode="numeric"
+                className="bi-filter-input"
+                placeholder="dd/mm/aaaa"
+                value={selectedPeriodStartInput}
+                onChange={(e) => setSelectedPeriodStartInput(e.target.value)}
+              />
             </div>
 
             <div className="bi-filter-group">
               <label htmlFor="period-end">Período Final</label>
-              <select id="period-end" value={selectedPeriodEnd} onChange={(e) => setSelectedPeriodEnd(e.target.value)}>
-                <option value="all">Até o Fim</option>
-                {periodOptions.map((option) => (
-                  <option key={option.value} value={option.value}>
-                    {option.label}
-                  </option>
-                ))}
-              </select>
+              <input
+                id="period-end"
+                type="text"
+                inputMode="numeric"
+                className="bi-filter-input"
+                placeholder="dd/mm/aaaa"
+                value={selectedPeriodEndInput}
+                onChange={(e) => setSelectedPeriodEndInput(e.target.value)}
+              />
             </div>
 
             <div className="bi-filter-group bi-filter-group-wide">

@@ -482,6 +482,7 @@
 
 [data-theme="light"] .bi-filter-group label { color: #64748B; }
 [data-theme="light"] .bi-filter-group select,
+[data-theme="light"] .bi-filter-input,
 [data-theme="light"] .bi-search-input,
 [data-theme="light"] .bi-multiselect-trigger {
   background: #FFFFFF;
@@ -1797,7 +1798,7 @@
     radial-gradient(circle at top left, rgba(14, 165, 233, 0.12), transparent 28%),
     linear-gradient(180deg, #060D1A 0%, #08101D 100%);
   color: #CBD5E1;
-  padding: 32px 24px 48px;
+  padding: 112px 24px 48px;
 }
 
 .bi-topbar {
@@ -1916,7 +1917,8 @@
   font-size: 0.85rem;
 }
 
-.bi-filter-group select {
+.bi-filter-group select,
+.bi-filter-input {
   min-width: 190px;
   padding: 12px 14px;
   border-radius: 12px;
@@ -3567,6 +3569,10 @@ aside {
 }
 
 @media (max-width: 768px) {
+  .bi-dashboard {
+    padding-top: 140px;
+  }
+
   .landing-showcase,
   .landing-access-grid,
   .landing-inline-grid,
@@ -3622,7 +3628,8 @@ aside {
     grid-template-columns: 1fr;
   }
 
-  .bi-filter-group select {
+  .bi-filter-group select,
+  .bi-filter-input {
     min-width: 100%;
   }
 
@@ -3771,7 +3778,7 @@ aside {
   }
 
   .bi-dashboard {
-    padding: 22px 12px 36px;
+    padding: 152px 12px 36px;
   }
 
   .bi-hero,

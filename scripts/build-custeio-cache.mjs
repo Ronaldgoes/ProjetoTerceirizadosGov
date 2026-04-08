@@ -192,14 +192,20 @@ async function fetchWithRetry(url, retries = 3) {
 }
 
 const records = new Map();
+const requestedPeriods = [];
+const fetchedPeriods = [];
+const missingPeriods = [];
 
 for (const [year, months] of Object.entries(official.monthsByYear)) {
   for (const month of months) {
+    const monthPeriodKey = `${year}-${String(month).padStart(2, "0")}`;
+    requestedPeriods.push(monthPeriodKey);
     const url = buildExportUrl(year, month);
     console.log(`Baixando ${url}`);
 
     const response = await fetchWithRetry(url);
     if (!response) {
+      missingPeriods.push(monthPeriodKey);
       console.log(`Aviso: exportacao oficial nao encontrada para ${year}-${String(month).padStart(2, "0")}.`);
       continue;
     }
@@ -207,6 +213,7 @@ for (const [year, months] of Object.entries(official.monthsByYear)) {
     const buffer = Buffer.from(await response.arrayBuffer());
     const csvText = decodeCsv(buffer);
     parseCsvToRecords(csvText, records);
+    fetchedPeriods.push(monthPeriodKey);
   }
 }
 
@@ -252,7 +259,19 @@ aggregatedRecords.forEach((record) => {
 
 const output = {
   generatedAt: new Date().toISOString(),
+  syncedAt: new Date().toISOString(),
   source: "Portal da Transparência SC - API oficial de Despesa (Grupo Natureza 33 - Outras Despesas Correntes)",
+  sourceSummary: {
+    requestedPeriods,
+    fetchedPeriods,
+    missingPeriods,
+    requestedPeriodsCount: requestedPeriods.length,
+    fetchedPeriodsCount: fetchedPeriods.length,
+    missingPeriodsCount: missingPeriods.length,
+    latestPeriodAvailable: aggregatedRecords.at(-1)?.periodKey || null,
+    latestPeriodLabel: aggregatedRecords.at(-1)?.monthLabel || null,
+    recordsAggregated: aggregatedRecords.length,
+  },
   availableYears: [...new Set(aggregatedRecords.map((record) => record.year))].sort((a, b) => a - b),
   periodLabels,
   elementos: [...elementos.values()].sort((a, b) => a.label.localeCompare(b.label)),

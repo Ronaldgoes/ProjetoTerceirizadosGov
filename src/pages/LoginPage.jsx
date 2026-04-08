@@ -24,6 +24,14 @@ export default function LoginPage() {
   const emailValid = email.endsWith(DOMAIN);
   const emailDirty = email.length > 0;
 
+  async function syncPortalDataOnLogin() {
+    try {
+      await fetch("/api/sync-custeio", { method: "POST" });
+    } catch {
+      // A sincronização automática do painel tentará novamente ao abrir a análise.
+    }
+  }
+
   async function handleSubmit(e) {
     e.preventDefault();
     setError("");
@@ -46,6 +54,7 @@ export default function LoginPage() {
       } else {
         await register(name, email, password);
       }
+      await syncPortalDataOnLogin();
       navigate(from, { replace: true });
     } catch (err) {
       const map = {

@@ -1,6 +1,8 @@
 import {
+  browserSessionPersistence,
   createUserWithEmailAndPassword,
   onAuthStateChanged,
+  setPersistence,
   signInWithEmailAndPassword,
   signOut,
   updateProfile,
@@ -63,6 +65,7 @@ export function AuthProvider({ children }) {
     if (!email.endsWith(ALLOWED_DOMAIN)) {
       throw new Error(`Apenas e-mails ${ALLOWED_DOMAIN} têm acesso ao sistema.`);
     }
+    await setPersistence(auth, browserSessionPersistence);
     const existingUsersSnapshot = await getDocs(query(collection(db, "users"), limit(1)));
     const isFirstUser = existingUsersSnapshot.empty;
     const role = isFirstUser || isAdminEmail(email) ? "admin" : "user";
@@ -82,6 +85,7 @@ export function AuthProvider({ children }) {
     if (!email.endsWith(ALLOWED_DOMAIN)) {
       throw new Error(`Apenas e-mails ${ALLOWED_DOMAIN} têm acesso ao sistema.`);
     }
+    await setPersistence(auth, browserSessionPersistence);
     const cred = await signInWithEmailAndPassword(auth, email, password);
     return cred.user;
   }

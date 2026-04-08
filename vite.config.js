@@ -1,5 +1,6 @@
 /* global process */
 import { spawn } from "node:child_process";
+import { existsSync } from "node:fs";
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 
@@ -22,10 +23,14 @@ function syncCusteioPlugin() {
     }
 
     isRunning = true;
-    const npmCommand = process.platform === "win32" ? "npm.cmd" : "npm";
+    const npmCliPath =
+      process.platform === "win32" && process.env.APPDATA
+        ? `${process.env.APPDATA}\\npm\\npm.cmd`
+        : null;
+    const npmCommand = npmCliPath && existsSync(npmCliPath) ? npmCliPath : process.platform === "win32" ? "npm.cmd" : "npm";
     const child = spawn(npmCommand, ["run", "sync:custeio"], {
       cwd: process.cwd(),
-      shell: false,
+      shell: process.platform === "win32",
     });
 
     let output = "";
