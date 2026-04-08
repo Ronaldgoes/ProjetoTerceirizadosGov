@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { useAuth } from "../hooks/useAuth";
+import { saveCusteioSyncPatch } from "../utils/custeioSyncSession";
 import "../styles/Auth.css";
 
 const DOMAIN = "@sef.sc.gov.br";
@@ -26,7 +27,13 @@ export default function LoginPage() {
 
   async function syncPortalDataOnLogin() {
     try {
-      await fetch("/api/sync-custeio", { method: "POST" });
+      const response = await fetch("/api/sync-custeio", { method: "POST" });
+      if (!response.ok) return;
+
+      const result = await response.json();
+      if (result?.cachePatch) {
+        saveCusteioSyncPatch(result.cachePatch);
+      }
     } catch {
       // A sincronização automática do painel tentará novamente ao abrir a análise.
     }

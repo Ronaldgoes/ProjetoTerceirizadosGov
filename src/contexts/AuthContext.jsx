@@ -11,6 +11,7 @@ import { collection, doc, getDoc, getDocs, limit, query, serverTimestamp, setDoc
 import { useEffect, useState } from "react";
 import { isAdminEmail } from "../config/admin";
 import { auth, db } from "../config/firebase";
+import { clearCusteioSyncPatch } from "../utils/custeioSyncSession";
 import { AuthContext } from "./authContextInstance";
 
 const ALLOWED_DOMAIN = "@sef.sc.gov.br";
@@ -91,6 +92,7 @@ export function AuthProvider({ children }) {
   }
 
   async function logout() {
+    clearCusteioSyncPatch();
     await signOut(auth);
   }
 

@@ -28,10 +28,16 @@ function syncCusteioPlugin() {
         ? `${process.env.APPDATA}\\npm\\npm.cmd`
         : null;
     const npmCommand = npmCliPath && existsSync(npmCliPath) ? npmCliPath : process.platform === "win32" ? "npm.cmd" : "npm";
-    const child = spawn(npmCommand, ["run", "sync:custeio"], {
-      cwd: process.cwd(),
-      shell: process.platform === "win32",
-    });
+    const child =
+      process.platform === "win32"
+        ? spawn("cmd.exe", ["/c", npmCommand, "run", "sync:custeio"], {
+            cwd: process.cwd(),
+            shell: false,
+          })
+        : spawn(npmCommand, ["run", "sync:custeio"], {
+            cwd: process.cwd(),
+            shell: false,
+          });
 
     let output = "";
 

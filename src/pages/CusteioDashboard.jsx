@@ -6,6 +6,7 @@ import TopBar from "../components/TopBar";
 import { CUSTEIO_DATA_CONTRACT } from "../config/custeioDataContract";
 import { CUSTEIO_DATA_SOURCE } from "../config/custeioDataSource";
 import { useAuth } from "../hooks/useAuth";
+import { loadCusteioSyncPatch, mergeCusteioDataset, saveCusteioSyncPatch } from "../utils/custeioSyncSession";
 import { buildMatrixRows as buildMatrixRowsHelper } from "../utils/matrix";
 
 const METRICS = [
@@ -1422,6 +1423,7 @@ export default function CusteioDashboard() {
       setStatus("Sincronizando base oficial do portal...");
 
       let syncCompleted = false;
+      let syncPatch = null;
 
       try {
         const syncResponse = await fetch("/api/sync-custeio", {
@@ -1432,6 +1434,10 @@ export default function CusteioDashboard() {
           const syncResult = await syncResponse.json();
           if (syncResult.ok) {
             syncCompleted = true;
+            if (syncResult.cachePatch) {
+              syncPatch = syncResult.cachePatch;
+              saveCusteioSyncPatch(syncPatch);
+            }
           }
         }
       } catch {
@@ -1445,15 +1451,18 @@ export default function CusteioDashboard() {
       }
 
       const officialCache = await response.json();
-      setDataset(officialCache);
-      if (syncCompleted) {
-        setLastSyncAt(new Date());
-      }
+      const storedPatch = syncPatch || loadCusteioSyncPatch();
+      const mergedDataset = storedPatch ? mergeCusteioDataset(officialCache, storedPatch) : officialCache;
+
+      setDataset(mergedDataset);
+      setLastSyncAt(storedPatch?.syncedAt ? new Date(storedPatch.syncedAt) : null);
       setStatus("");
       setRefreshInfo(
-        syncCompleted
-          ? "Base oficial sincronizada automaticamente com o Portal da Transparência."
-          : "Painel recarregado com a base oficial publicada disponível."
+        syncPatch
+          ? "Base atualizada no login com os dados mais recentes do portal."
+          : syncCompleted
+            ? "Base oficial sincronizada automaticamente com o Portal da Transparência."
+            : "Painel recarregado com a base oficial publicada disponível."
       );
     } catch (error) {
       setStatus(error instanceof Error ? error.message : "Não foi possível sincronizar os dados oficiais do painel.");
