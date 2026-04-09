@@ -122,6 +122,16 @@ const fmtPercent = (value) => {
   return `${value >= 0 ? "+" : ""}${value.toFixed(1)}%`;
 };
 
+function formatValueAndPercentLine(value, percent) {
+  const safeValue = Number(value || 0);
+  const safePercent = Number(percent || 0);
+
+  if (safeValue === 0 && safePercent === 0) return "";
+  if (safePercent === 0) return fmtCurrency(safeValue);
+  if (safeValue === 0) return fmtPercent(safePercent);
+  return `${fmtPercent(safePercent)} | ${fmtCurrency(safeValue)}`;
+}
+
 const normalize = (value) =>
   String(value || "")
     .toLowerCase()
@@ -213,8 +223,7 @@ function buildDistributionRelations(records, sourceKey, targetKey, metricKey) {
           value,
           pct: total > 0 ? (value / total) * 100 : 0,
         }))
-        .sort((a, b) => b.value - a.value)
-        .slice(0, 3);
+        .sort((a, b) => b.value - a.value);
 
       return [sourceLabel, { total, items }];
     })
@@ -259,8 +268,20 @@ function MetricCard({ label, value, secondary }) {
   );
 }
 
-function BarList({ title, items, onClickItem, selectedItem, limitHeight = false }) {
+function BarList({
+  title,
+  items,
+  onClickItem,
+  selectedItem,
+  limitHeight = false,
+  referenceTotal = null,
+  relatedLabels = null,
+}) {
   const maxValue = items[0]?.value || 1;
+  const hasCrossSelection = !selectedItem && relatedLabels && relatedLabels.size > 0;
+  const effectiveReferenceTotal = Number.isFinite(referenceTotal) && referenceTotal > 0
+    ? referenceTotal
+    : items.reduce((acc, item) => acc + item.value, 0);
 
   return (
     <section className="bi-panel">
@@ -269,23 +290,35 @@ function BarList({ title, items, onClickItem, selectedItem, limitHeight = false 
       </div>
 
       <div className={`bi-bar-list${limitHeight ? " is-scrollable" : ""}`}>
-        {items.map((item) => (
-          <div
-            key={item.label}
-            className={`bi-bar-item${selectedItem === item.label ? " is-selected" : ""}${
-              onClickItem ? " is-clickable" : ""
-            }`}
-            onClick={() => onClickItem?.(item.label === selectedItem ? null : item.label)}
-          >
-            <div className="bi-bar-copy">
-              <strong>{item.label}</strong>
-              <span>{fmtCurrency(item.value)}</span>
+        {items.map((item) => {
+          const isSelected = selectedItem === item.label;
+          const isRelated = relatedLabels?.has(item.label);
+          const isDimmed = hasCrossSelection && !isRelated;
+          const itemPct = effectiveReferenceTotal > 0 ? (item.value / effectiveReferenceTotal) * 100 : 0;
+
+          return (
+            <div
+              key={item.label}
+              className={`bi-bar-item${isSelected ? " is-selected" : ""}${isRelated ? " is-related" : ""}${
+                isDimmed ? " is-dimmed" : ""
+              }${onClickItem ? " is-clickable" : ""}`}
+              onClick={() => onClickItem?.(item.label === selectedItem ? null : item.label)}
+            >
+              <div className="bi-bar-copy">
+                <strong>{item.label}</strong>
+                {formatValueAndPercentLine(item.value, itemPct) ? (
+                  <div className="bi-bar-metrics">
+                    {item.value !== 0 ? <span>{fmtCurrency(item.value)}</span> : null}
+                    {itemPct !== 0 ? <small>{fmtPercent(itemPct)}</small> : null}
+                  </div>
+                ) : null}
+              </div>
+              <div className="bi-bar-track">
+                <div className="bi-bar-fill" style={{ width: `${(item.value / maxValue) * 100}%` }} />
+              </div>
             </div>
-            <div className="bi-bar-track">
-              <div className="bi-bar-fill" style={{ width: `${(item.value / maxValue) * 100}%` }} />
-            </div>
-          </div>
-        ))}
+          );
+        })}
       </div>
     </section>
   );
@@ -321,10 +354,9 @@ function TopRankingPanel({ title, items, limit = 10 }) {
   );
 }
 
-function PiePanel({ title, items, panelKey, hoveredState, onHoverChange, relationInfo, relationTargetLabel, othersItems = [] }) {
+function PiePanel({ title, items, panelKey, hoveredState, onHoverChange, relationInfo, relationTargetLabel }) {
   const safeHoverState = hoveredState && typeof hoveredState === "object" ? hoveredState : null;
   const hoveredLabel = safeHoverState?.source === panelKey ? safeHoverState.label : null;
-  const isOthersSelected = hoveredLabel === "Outras Despesas";
   const relatedLabels =
     safeHoverState?.source && safeHoverState.source !== panelKey
       ? new Set(relationInfo?.items?.map((item) => item.label) || [])
@@ -390,58 +422,75 @@ function PiePanel({ title, items, panelKey, hoveredState, onHoverChange, relatio
                 <span className="bi-pie-dot" style={{ background: segment.color }} />
                 <div>
                   <strong>{segment.label}</strong>
-                  <span className="bi-pie-meta">
-                    {fmtPercent(segment.pct)} | {fmtCurrency(segment.value)}
-                  </span>
+                  {formatValueAndPercentLine(segment.value, segment.pct) ? (
+                    <span className="bi-pie-meta">
+                      {formatValueAndPercentLine(segment.value, segment.pct)}
+                    </span>
+                  ) : null}
                 </div>
               </div>
             );
           })}
         </div>
       </div>
+    </section>
+  );
+}
 
-      {isOthersSelected && othersItems.length > 0 ? (
+function DistributionRelationshipCard({ hoveredState, relationInfo, relationTargetLabel, othersItems = [], onClear }) {
+  if (hoveredState?.label === "Outras Despesas" && othersItems.length > 0) {
+    return (
+      <section className="bi-panel bi-distribution-relationship-panel">
         <div className="bi-pie-relationship-card">
           <strong>Composição de Outras Despesas</strong>
           <div className="bi-pie-relationship-list">
-            {othersItems.slice(0, 10).map((item) => (
-              <div key={`${panelKey}-others-${item.label}`} className="bi-pie-relationship-item">
+            {othersItems.map((item) => (
+              <div key={`distribution-others-${item.label}`} className="bi-pie-relationship-item">
                 <span>{item.label}</span>
-                <span>{fmtCurrency(item.value)}</span>
+                {item.value !== 0 ? <span>{fmtCurrency(item.value)}</span> : null}
               </div>
             ))}
           </div>
-          {othersItems.length > 10 ? (
-            <div className="bi-pie-relationship-footnote">Exibindo 10 de {othersItems.length} itens agrupados em outras despesas.</div>
-          ) : null}
-          <button type="button" className="bi-pie-clear-selection" onClick={() => onHoverChange?.(null)}>
+          <button type="button" className="bi-pie-clear-selection" onClick={onClear}>
             Limpar seleção
           </button>
         </div>
-      ) : safeHoverState && relationInfo ? (
+      </section>
+    );
+  }
+
+  if (hoveredState && relationInfo) {
+    return (
+      <section className="bi-panel bi-distribution-relationship-panel">
         <div className="bi-pie-relationship-card">
           <strong>
-            {safeHoverState.label}
+            {hoveredState.label}
             {" -> "}
             {relationTargetLabel}
           </strong>
           <div className="bi-pie-relationship-list">
             {relationInfo.items.map((item) => (
-              <div key={`${safeHoverState.label}-${item.label}`} className="bi-pie-relationship-item">
+              <div key={`${hoveredState.label}-${item.label}`} className="bi-pie-relationship-item">
                 <span>{item.label}</span>
-                <span>{fmtPercent(item.pct)} | {fmtCurrency(item.value)}</span>
+                {formatValueAndPercentLine(item.value, item.pct) ? (
+                  <span>{formatValueAndPercentLine(item.value, item.pct)}</span>
+                ) : null}
               </div>
             ))}
           </div>
-          <button type="button" className="bi-pie-clear-selection" onClick={() => onHoverChange?.(null)}>
+          <button type="button" className="bi-pie-clear-selection" onClick={onClear}>
             Limpar seleção
           </button>
         </div>
-      ) : (
-        <div className="bi-pie-relationship-card is-empty">
-          Clique em um item para ver a relação entre subelemento e unidade gestora.
-        </div>
-      )}
+      </section>
+    );
+  }
+
+  return (
+    <section className="bi-panel bi-distribution-relationship-panel">
+      <div className="bi-pie-relationship-card is-empty">
+        Clique em um item para ver a relação entre subelemento e unidade gestora.
+      </div>
     </section>
   );
 }
@@ -1402,6 +1451,8 @@ function AlertTable({ title, rows, baseLabel, compareLabel, emptyMessage, totalV
 
 export default function CusteioDashboard() {
   const { user } = useAuth();
+  const distributionSectionRef = useRef(null);
+  const rankingSectionRef = useRef(null);
   const fixedPeriodStartInput = "01/01/2021";
   const currentDateInput = new Intl.DateTimeFormat("pt-BR", {
     timeZone: "America/Sao_Paulo",
@@ -1435,6 +1486,32 @@ export default function CusteioDashboard() {
   const [subelementoSearch, setSubelementoSearch] = useState("");
   const [unidadeSearch, setUnidadeSearch] = useState("");
   const deferredMatrixSearch = useDeferredValue(matrixSearch);
+
+  useEffect(() => {
+    if (activeTab !== "distribution" || !distributionHover) return undefined;
+
+    const handleOutsideClick = (event) => {
+      if (distributionSectionRef.current?.contains(event.target)) return;
+      setDistributionHover(null);
+    };
+
+    document.addEventListener("pointerdown", handleOutsideClick);
+    return () => document.removeEventListener("pointerdown", handleOutsideClick);
+  }, [activeTab, distributionHover]);
+
+  useEffect(() => {
+    if (activeTab !== "trends") return undefined;
+    if (!selectedSubelementInRanking && !selectedUgInRanking) return undefined;
+
+    const handleOutsideClick = (event) => {
+      if (rankingSectionRef.current?.contains(event.target)) return;
+      setSelectedSubelementInRanking(null);
+      setSelectedUgInRanking(null);
+    };
+
+    document.addEventListener("pointerdown", handleOutsideClick);
+    return () => document.removeEventListener("pointerdown", handleOutsideClick);
+  }, [activeTab, selectedSubelementInRanking, selectedUgInRanking]);
 
   const refreshDashboard = useCallback(async () => {
     try {
@@ -1783,23 +1860,101 @@ export default function CusteioDashboard() {
     };
   }, [activeTab, selectedMetric, visibleRecords]);
 
+  const distributionSelectionDetails = useMemo(() => {
+    if (!distributionHover) {
+      return {
+        relationInfo: null,
+        relationTargetLabel: "",
+        othersItems: [],
+      };
+    }
+
+    if (distributionHover.label === "Outras Despesas") {
+      return {
+        relationInfo: null,
+        relationTargetLabel: "",
+        othersItems: distributionHover.source === "subelemento" ? fullSubelementos.slice(10) : fullUnidades.slice(10),
+      };
+    }
+
+    if (distributionHover.source === "subelemento") {
+      return {
+        relationInfo: distributionRelations.bySubelemento.get(distributionHover.label) || null,
+        relationTargetLabel: "UGs relacionadas",
+        othersItems: [],
+      };
+    }
+
+    return {
+      relationInfo: distributionRelations.byUnidade.get(distributionHover.label) || null,
+      relationTargetLabel: "Subelementos relacionados",
+      othersItems: [],
+    };
+  }, [distributionHover, distributionRelations.bySubelemento, distributionRelations.byUnidade, fullSubelementos, fullUnidades]);
+
   const rankingSubelementos = useMemo(() => {
     if (activeTab !== "trends") return [];
-    let recs = visibleRecords;
-    if (selectedUgInRanking) {
-      recs = recs.filter((r) => r.unidadeGestoraLabel === selectedUgInRanking);
-    }
-    return aggregateBy(recs, "subelementoLabel", selectedMetric, 5000);
-  }, [activeTab, selectedMetric, selectedUgInRanking, visibleRecords]);
+    return aggregateBy(visibleRecords, "subelementoLabel", selectedMetric, 5000);
+  }, [activeTab, selectedMetric, visibleRecords]);
 
   const rankingUnidades = useMemo(() => {
     if (activeTab !== "trends") return [];
-    let recs = visibleRecords;
-    if (selectedSubelementInRanking) {
-      recs = recs.filter((r) => r.subelementoLabel === selectedSubelementInRanking);
+    return aggregateBy(visibleRecords, "unidadeGestoraLabel", selectedMetric, 5000);
+  }, [activeTab, selectedMetric, visibleRecords]);
+
+  const rankingRelations = useMemo(() => {
+    if (activeTab !== "trends") {
+      return { bySubelemento: new Map(), byUnidade: new Map() };
     }
-    return aggregateBy(recs, "unidadeGestoraLabel", selectedMetric, 5000);
-  }, [activeTab, selectedMetric, selectedSubelementInRanking, visibleRecords]);
+
+    return {
+      bySubelemento: buildDistributionRelations(
+        visibleRecords,
+        "subelementoLabel",
+        "unidadeGestoraLabel",
+        selectedMetric
+      ),
+      byUnidade: buildDistributionRelations(
+        visibleRecords,
+        "unidadeGestoraLabel",
+        "subelementoLabel",
+        selectedMetric
+      ),
+    };
+  }, [activeTab, selectedMetric, visibleRecords]);
+
+  const rankingTotalDespesa = useMemo(
+    () => visibleRecords.reduce((acc, record) => acc + (record[selectedMetric] || 0), 0),
+    [selectedMetric, visibleRecords]
+  );
+
+  const rankingSubelementoRelatedLabels = useMemo(() => {
+    if (!selectedUgInRanking) return null;
+    return new Set(
+      (rankingRelations.byUnidade.get(selectedUgInRanking)?.items || []).map((item) => item.label)
+    );
+  }, [rankingRelations.byUnidade, selectedUgInRanking]);
+
+  const rankingUgRelatedLabels = useMemo(() => {
+    if (!selectedSubelementInRanking) return null;
+    return new Set(
+      (rankingRelations.bySubelemento.get(selectedSubelementInRanking)?.items || []).map((item) => item.label)
+    );
+  }, [rankingRelations.bySubelemento, selectedSubelementInRanking]);
+
+  const rankingSubelementosReferenceTotal = useMemo(() => {
+    if (selectedUgInRanking) {
+      return rankingRelations.byUnidade.get(selectedUgInRanking)?.total || 0;
+    }
+    return rankingTotalDespesa;
+  }, [rankingRelations.byUnidade, rankingTotalDespesa, selectedUgInRanking]);
+
+  const rankingUnidadesReferenceTotal = useMemo(() => {
+    if (selectedSubelementInRanking) {
+      return rankingRelations.bySubelemento.get(selectedSubelementInRanking)?.total || 0;
+    }
+    return rankingTotalDespesa;
+  }, [rankingRelations.bySubelemento, rankingTotalDespesa, selectedSubelementInRanking]);
 
   const monthlyVisibleTotals = useMemo(() => {
     if (!["monthly", "trends", "ugRanking"].includes(activeTab)) return [];
@@ -2423,53 +2578,64 @@ export default function CusteioDashboard() {
         )}
 
         {activeTab === "distribution" && (
-          <section className="bi-grid">
-            <PiePanel
-              title={`${currentMetricNoun} por Subelemento`}
-              items={topSubelementos}
-              panelKey="subelemento"
-              hoveredState={distributionHover}
-              onHoverChange={setDistributionHover}
-              othersItems={fullSubelementos.slice(10)}
-              relationInfo={
-                distributionHover
-                  ? distributionHover.source === "subelemento"
-                    ? distributionRelations.bySubelemento.get(distributionHover.label)
-                    : distributionRelations.byUnidade.get(distributionHover.label)
-                  : null
-              }
-              relationTargetLabel={
-                distributionHover?.source === "unidade" ? "Subelementos relacionados" : "UGs relacionadas"
-              }
-            />
-            <PiePanel
-              title={`${currentMetricNoun} por Unidade Gestora`}
-              items={topUnidades}
-              panelKey="unidade"
-              hoveredState={distributionHover}
-              onHoverChange={setDistributionHover}
-              othersItems={fullUnidades.slice(10)}
-              relationInfo={
-                distributionHover
-                  ? distributionHover.source === "unidade"
-                    ? distributionRelations.byUnidade.get(distributionHover.label)
-                    : distributionRelations.bySubelemento.get(distributionHover.label)
-                  : null
-              }
-              relationTargetLabel={
-                distributionHover?.source === "subelemento" ? "UGs relacionadas" : "Subelementos relacionados"
-              }
-            />
-          </section>
+          <>
+            <section ref={distributionSectionRef} className="bi-grid">
+              <PiePanel
+                title={`${currentMetricNoun} por Subelemento`}
+                items={topSubelementos}
+                panelKey="subelemento"
+                hoveredState={distributionHover}
+                onHoverChange={setDistributionHover}
+                relationInfo={
+                  distributionHover
+                    ? distributionHover.source === "subelemento"
+                      ? distributionRelations.bySubelemento.get(distributionHover.label)
+                      : distributionRelations.byUnidade.get(distributionHover.label)
+                    : null
+                }
+                relationTargetLabel={
+                  distributionHover?.source === "unidade" ? "Subelementos relacionados" : "UGs relacionadas"
+                }
+              />
+              <PiePanel
+                title={`${currentMetricNoun} por Unidade Gestora`}
+                items={topUnidades}
+                panelKey="unidade"
+                hoveredState={distributionHover}
+                onHoverChange={setDistributionHover}
+                relationInfo={
+                  distributionHover
+                    ? distributionHover.source === "unidade"
+                      ? distributionRelations.byUnidade.get(distributionHover.label)
+                      : distributionRelations.bySubelemento.get(distributionHover.label)
+                    : null
+                }
+                relationTargetLabel={
+                  distributionHover?.source === "subelemento" ? "UGs relacionadas" : "Subelementos relacionados"
+                }
+              />
+            </section>
+            <section className="bi-grid bi-grid-single">
+              <DistributionRelationshipCard
+                hoveredState={distributionHover}
+                relationInfo={distributionSelectionDetails.relationInfo}
+                relationTargetLabel={distributionSelectionDetails.relationTargetLabel}
+                othersItems={distributionSelectionDetails.othersItems}
+                onClear={() => setDistributionHover(null)}
+              />
+            </section>
+          </>
         )}
 
         {activeTab === "trends" && (
-          <section className="bi-grid">
+          <section ref={rankingSectionRef} className="bi-grid">
             <BarList
               title={`Subelementos com Maior ${currentMetricNoun}`}
               items={rankingSubelementos}
               onClickItem={setSelectedSubelementInRanking}
               selectedItem={selectedSubelementInRanking}
+              relatedLabels={rankingSubelementoRelatedLabels}
+              referenceTotal={rankingSubelementosReferenceTotal}
               limitHeight
             />
             <BarList
@@ -2477,6 +2643,8 @@ export default function CusteioDashboard() {
               items={rankingUnidades}
               onClickItem={setSelectedUgInRanking}
               selectedItem={selectedUgInRanking}
+              relatedLabels={rankingUgRelatedLabels}
+              referenceTotal={rankingUnidadesReferenceTotal}
               limitHeight
             />
           </section>
