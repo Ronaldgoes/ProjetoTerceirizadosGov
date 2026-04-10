@@ -1,0 +1,102 @@
+{
+  "name": "Custeio SC",
+  "dataColors": [
+    "#5675B7",
+    "#12844C",
+    "#D8313E",
+    "#666666",
+    "#7E90C7",
+    "#3C9C63",
+    "#E8848D",
+    "#B7C6E5"
+  ],
+  "background": "#F2F5FA",
+  "foreground": "#1F2937",
+  "tableAccent": "#5675B7",
+  "visualStyles": {
+    "*": {
+      "*": {
+        "title": [
+          {
+            "show": true,
+            "fontColor": { "solid": { "color": "#1F2937" } },
+            "fontSize": 13,
+            "fontFamily": "Segoe UI Semibold"
+          }
+        ],
+        "background": [
+          {
+            "show": false,
+            "color": { "solid": { "color": "#FFFFFF" } },
+            "transparency": 0
+          }
+        ],
+        "border": [
+          {
+            "show": true,
+            "color": { "solid": { "color": "#D7DFEA" } },
+            "radius": 10
+          }
+        ]
+      }
+    },
+    "page": {
+      "*": {
+        "background": [
+          {
+            "color": { "solid": { "color": "#F2F5FA" } },
+            "transparency": 0
+          }
+        ]
+      }
+    },
+    "card": {
+      "*": {
+        "labels": [
+          {
+            "color": { "solid": { "color": "#1F2937" } },
+            "fontSize": 24
+          }
+        ],
+        "categoryLabels": [
+          {
+            "color": { "solid": { "color": "#667085" } },
+            "fontSize": 11
+          }
+        ]
+      }
+    },
+    "slicer": {
+      "*": {
+        "title": [
+          {
+            "fontColor": { "solid": { "color": "#1F2937" } }
+          }
+        ],
+        "items": [
+          {
+            "fontColor": { "solid": { "color": "#334155" } },
+            "background": { "solid": { "color": "#FFFFFF" } }
+          }
+        ]
+      }
+    },
+    "tableEx": {
+      "*": {
+        "grid": [
+          {
+            "gridVertical": true,
+            "gridHorizontal": true,
+            "outlineColor": { "solid": { "color": "#E5E7EB" } }
+          }
+        ],
+        "columnHeaders": [
+          {
+            "fontColor": { "solid": { "color": "#FFFFFF" } },
+            "backColor": { "solid": { "color": "#5675B7" } }
+          }
+        ]
+      }
+    }
+  }
+}

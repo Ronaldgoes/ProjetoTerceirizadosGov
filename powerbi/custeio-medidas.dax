@@ -1,0 +1,181 @@
+// TABELAS
+
+dMetrica =
+DATATABLE(
+    "Metrica", STRING,
+    {
+        { "Empenhado" },
+        { "Liquidado" },
+        { "Pago" }
+    }
+)
+
+dCalendario =
+ADDCOLUMNS(
+    CALENDAR(MIN(fCusteio[DataRef]), MAX(fCusteio[DataRef])),
+    "Ano", YEAR([Date]),
+    "MesNumero", MONTH([Date]),
+    "MesNome", FORMAT([Date], "MMM"),
+    "MesAno", FORMAT([Date], "MMM/yyyy"),
+    "PeriodoKey", FORMAT([Date], "yyyy-MM"),
+    "Trimestre", "T" & FORMAT([Date], "Q"),
+    "AnoMesOrdem", YEAR([Date]) * 100 + MONTH([Date])
+)
+
+// MEDIDAS BASE
+
+Valor Empenhado =
+SUM(fCusteio[Empenhado])
+
+Valor Liquidado =
+SUM(fCusteio[Liquidado])
+
+Valor Pago =
+SUM(fCusteio[Pago])
+
+Valor Selecionado =
+SWITCH(
+    SELECTEDVALUE(dMetrica[Metrica], "Empenhado"),
+    "Empenhado", [Valor Empenhado],
+    "Liquidado", [Valor Liquidado],
+    "Pago", [Valor Pago],
+    [Valor Empenhado]
+)
+
+Participacao % =
+DIVIDE(
+    [Valor Selecionado],
+    CALCULATE([Valor Selecionado], ALLSELECTED(fCusteio))
+)
+
+// TEMPO
+
+Valor Mes Anterior =
+CALCULATE(
+    [Valor Selecionado],
+    DATEADD(dCalendario[Date], -1, MONTH)
+)
+
+Valor Ano Anterior =
+CALCULATE(
+    [Valor Selecionado],
+    DATEADD(dCalendario[Date], -1, YEAR)
+)
+
+Variacao Mensal % =
+DIVIDE([Valor Selecionado] - [Valor Mes Anterior], [Valor Mes Anterior])
+
+Variacao Anual % =
+DIVIDE([Valor Selecionado] - [Valor Ano Anterior], [Valor Ano Anterior])
+
+Data Inicial Selecao =
+MINX(ALLSELECTED(dCalendario), dCalendario[Date])
+
+Data Final Selecao =
+MAXX(ALLSELECTED(dCalendario), dCalendario[Date])
+
+Valor Periodo Inicial =
+VAR DataBase = [Data Inicial Selecao]
+RETURN
+CALCULATE(
+    [Valor Selecionado],
+    KEEPFILTERS(dCalendario[Date] = DataBase)
+)
+
+Valor Periodo Final =
+VAR DataBase = [Data Final Selecao]
+RETURN
+CALCULATE(
+    [Valor Selecionado],
+    KEEPFILTERS(dCalendario[Date] = DataBase)
+)
+
+Variacao Recorte % =
+DIVIDE([Valor Periodo Final] - [Valor Periodo Inicial], [Valor Periodo Inicial])
+
+Pico da Serie =
+MAXX(
+    VALUES(dCalendario[PeriodoKey]),
+    [Valor Selecionado]
+)
+
+// RANKINGS
+
+Ranking UG =
+RANKX(
+    ALLSELECTED(fCusteio[UGLabel]),
+    [Valor Selecionado],
+    ,
+    DESC,
+    DENSE
+)
+
+Ranking Subelemento =
+RANKX(
+    ALLSELECTED(fCusteio[SubelementoLabel]),
+    [Valor Selecionado],
+    ,
+    DESC,
+    DENSE
+)
+
+Ranking Elemento =
+RANKX(
+    ALLSELECTED(fCusteio[ElementoLabel]),
+    [Valor Selecionado],
+    ,
+    DESC,
+    DENSE
+)
+
+UG Top 10 =
+IF([Ranking UG] <= 10, [Valor Selecionado])
+
+Subelemento Top 10 =
+IF([Ranking Subelemento] <= 10, [Valor Selecionado])
+
+Elemento Top 10 =
+IF([Ranking Elemento] <= 10, [Valor Selecionado])
+
+// DESTAQUES
+
+UG Dominante =
+VAR TabelaUG =
+    TOPN(
+        1,
+        ALLSELECTED(fCusteio[UGLabel]),
+        [Valor Selecionado],
+        DESC
+    )
+RETURN
+CONCATENATEX(TabelaUG, fCusteio[UGLabel], ", ")
+
+Subelemento Dominante =
+VAR TabelaSub =
+    TOPN(
+        1,
+        ALLSELECTED(fCusteio[SubelementoLabel]),
+        [Valor Selecionado],
+        DESC
+    )
+RETURN
+CONCATENATEX(TabelaSub, fCusteio[SubelementoLabel], ", ")
+
+Elemento Dominante =
+VAR TabelaEl =
+    TOPN(
+        1,
+        ALLSELECTED(fCusteio[ElementoLabel]),
+        [Valor Selecionado],
+        DESC
+    )
+RETURN
+CONCATENATEX(TabelaEl, fCusteio[ElementoLabel], ", ")
+
+// ALERTAS
+
+Alerta Limite % =
+0.1
+
+Em Alerta % =
+IF(ABS([Variacao Mensal %]) >= [Alerta Limite %], 1, 0)

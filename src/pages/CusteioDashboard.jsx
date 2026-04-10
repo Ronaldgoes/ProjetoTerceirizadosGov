@@ -1,6 +1,9 @@
 ﻿import { useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { useCallback } from "react";
+import html2canvas from "html2canvas";
+import { jsPDF } from "jspdf";
+import * as XLSX from "xlsx";
 import MatrixPanelView from "../components/MatrixPanel";
 import TopBar from "../components/TopBar";
 import { CUSTEIO_DATA_CONTRACT } from "../config/custeioDataContract";
@@ -122,12 +125,402 @@ const fmtPercent = (value) => {
   return `${value >= 0 ? "+" : ""}${value.toFixed(1)}%`;
 };
 
+const trimSheetName = (name) => String(name || "Dados").replace(/[\\/*?:[\]]/g, " ").slice(0, 31);
+
+const sanitizeFileName = (value) =>
+  String(value || "arquivo")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^a-zA-Z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .toLowerCase();
+
+const buildWorkbookFromSheets = (sheets) => {
+  const workbook = XLSX.utils.book_new();
+  (sheets || []).forEach((sheet, index) => {
+    const rows = Array.isArray(sheet?.rows) ? sheet.rows : [];
+    const worksheet = rows.length > 0
+      ? XLSX.utils.json_to_sheet(rows)
+      : XLSX.utils.aoa_to_sheet([["Sem dados para o recorte selecionado."]]);
+    XLSX.utils.book_append_sheet(workbook, worksheet, trimSheetName(sheet?.name || `Aba ${index + 1}`));
+  });
+  return workbook;
+};
+
+const downloadWorkbook = (sheets, fileName) => {
+  const workbook = buildWorkbookFromSheets(sheets);
+  XLSX.writeFile(workbook, `${sanitizeFileName(fileName)}.xlsx`);
+};
+
+const captureElementCanvas = async (element) => {
+  if (!element) throw new Error("Bloco não encontrado para exportação.");
+  return html2canvas(element, {
+    backgroundColor: "#101726",
+    scale: Math.max(window.devicePixelRatio || 1, 2),
+    useCORS: true,
+    logging: false,
+    ignoreElements: (node) => node?.dataset?.exportIgnore === "true",
+  });
+};
+
+const downloadCanvasAsJpg = (canvas, fileName) => {
+  const link = document.createElement("a");
+  link.download = `${sanitizeFileName(fileName)}.jpg`;
+  link.href = canvas.toDataURL("image/jpeg", 0.96);
+  link.click();
+};
+
+const formatPdfCellValue = (value, key = "") => {
+  if (value === null || value === undefined || value === "") return "--";
+  if (typeof value === "number") {
+    if (Number.isNaN(value)) return "--";
+    if (String(key).includes("%") || Math.abs(value) <= 100) return `${value.toFixed(1).replace(".", ",")}${String(key).includes("%") ? "" : ""}`;
+    return fmtCurrency(value);
+  }
+  return String(value);
+};
+
+const prettifyExportTitle = (value) =>
+  String(value || "Bloco")
+    .replace(/[_-]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .replace(/\b\w/g, (letter) => letter.toUpperCase());
+
+const addPdfWrappedText = (pdf, text, x, y, maxWidth, lineHeight = 14) => {
+  const lines = pdf.splitTextToSize(String(text || ""), maxWidth);
+  pdf.text(lines, x, y);
+  return y + lines.length * lineHeight;
+};
+
+const ensurePdfSpace = (pdf, currentY, neededHeight, margin, orientation = "portrait") => {
+  const pageHeight = pdf.internal.pageSize.getHeight();
+  if (currentY + neededHeight <= pageHeight - margin) return currentY;
+  pdf.addPage("a4", orientation);
+  return margin;
+};
+
+const findPrimaryLabelKey = (rows = []) => {
+  const sample = rows[0];
+  if (!sample) return null;
+  return ["Item", "Categoria", "Indicador", "Mês", "Ano", "Chave"].find((key) => key in sample)
+    || Object.keys(sample).find((key) => typeof sample[key] === "string")
+    || null;
+};
+
+const findPrimaryValueKey = (rows = []) => {
+  const sample = rows[0];
+  if (!sample) return null;
+  return ["Valor", "Total", "Diferença", "Variação %", "Impacto %"].find((key) => key in sample)
+    || Object.keys(sample).find((key) => typeof sample[key] === "number")
+    || null;
+};
+
+const buildExportInsights = (sheets = [], metricLabel = "") => {
+  const primaryRows = sheets[0]?.rows || [];
+  const secondaryRows = sheets[1]?.rows || [];
+  const labelKey = findPrimaryLabelKey(primaryRows);
+  const valueKey = findPrimaryValueKey(primaryRows);
+  const highlights = [];
+
+  if (labelKey && valueKey && primaryRows.length > 0) {
+    const numericRows = primaryRows.filter((row) => typeof row[valueKey] === "number" && Number.isFinite(row[valueKey]));
+    const sortedRows = [...numericRows].sort((a, b) => (b[valueKey] || 0) - (a[valueKey] || 0));
+    const topRow = sortedRows[0];
+    const total = numericRows.reduce((acc, row) => acc + (row[valueKey] || 0), 0);
+    if (topRow) {
+      const concentration = total > 0 ? (topRow[valueKey] / total) * 100 : 0;
+      highlights.push({
+        title: "Maior destaque",
+        value: topRow[labelKey],
+        note: `${formatPdfCellValue(topRow[valueKey], valueKey)}${total > 0 ? ` • ${fmtPercent(concentration)}` : ""}`,
+      });
+    }
+
+    const firstRow = numericRows[0];
+    const lastRow = numericRows[numericRows.length - 1];
+    if (firstRow && lastRow && firstRow[valueKey]) {
+      highlights.push({
+        title: "Comparativo do recorte",
+        value: fmtPercent(((lastRow[valueKey] - firstRow[valueKey]) / firstRow[valueKey]) * 100),
+        note: `${firstRow[labelKey]} -> ${lastRow[labelKey]}`,
+      });
+    }
+
+    highlights.push({
+      title: "Linhas analisadas",
+      value: `${primaryRows.length}`,
+      note: metricLabel || "Dados do bloco",
+    });
+  }
+
+  const bullets = [];
+  if (highlights[0]) bullets.push(`${highlights[0].value} lidera o bloco analisado, com ${highlights[0].note.toLowerCase()}.`);
+  if (highlights[1]) bullets.push(`No período selecionado, o comparativo principal do bloco ficou em ${highlights[1].value}.`);
+  if (secondaryRows.length > 0) bullets.push(`A exportação inclui uma segunda leitura de apoio para aprofundar o comparativo do mesmo recorte.`);
+  bullets.push("Os números refletem apenas os filtros ativos no momento da exportação.");
+
+  return {
+    highlights: highlights.slice(0, 3),
+    bullets: bullets.slice(0, 4),
+  };
+};
+
+const drawPdfHighlights = (pdf, highlights, margin, startY, availableWidth) => {
+  if (!highlights.length) return startY;
+  const gap = 12;
+  const cardWidth = (availableWidth - gap * (highlights.length - 1)) / highlights.length;
+  highlights.forEach((item, index) => {
+    const x = margin + index * (cardWidth + gap);
+    pdf.setFillColor(245, 247, 251);
+    pdf.roundedRect(x, startY, cardWidth, 74, 14, 14, "F");
+    pdf.setFont("helvetica", "bold");
+    pdf.setFontSize(10);
+    pdf.setTextColor(86, 117, 183);
+    pdf.text(item.title, x + 14, startY + 20);
+    pdf.setFontSize(15);
+    pdf.setTextColor(24, 31, 46);
+    pdf.text(String(item.value || "--"), x + 14, startY + 42, { maxWidth: cardWidth - 24 });
+    pdf.setFont("helvetica", "normal");
+    pdf.setFontSize(9);
+    pdf.setTextColor(82, 90, 108);
+    pdf.text(String(item.note || ""), x + 14, startY + 60, { maxWidth: cardWidth - 24 });
+  });
+  return startY + 92;
+};
+
+const drawPdfTable = (pdf, rows, startY, margin, availableWidth, options = {}) => {
+  const safeRows = Array.isArray(rows) ? rows : [];
+  const orientation = options.orientation || "portrait";
+  const maxRows = options.maxRows || 8;
+  if (safeRows.length === 0) {
+    pdf.setFont("helvetica", "italic");
+    pdf.setFontSize(10);
+    pdf.setTextColor(110, 118, 138);
+    pdf.text("Sem dados para o recorte selecionado.", margin, startY);
+    return startY + 18;
+  }
+
+  const columns = Object.keys(safeRows[0]).slice(0, options.maxCols || 5);
+  const columnWidth = availableWidth / Math.max(columns.length, 1);
+  let y = startY;
+
+  y = ensurePdfSpace(pdf, y, 28, margin, orientation);
+  pdf.setFillColor(86, 117, 183);
+  pdf.roundedRect(margin, y, availableWidth, 22, 8, 8, "F");
+  pdf.setFont("helvetica", "bold");
+  pdf.setFontSize(9);
+  pdf.setTextColor(255, 255, 255);
+  columns.forEach((column, index) => {
+    pdf.text(String(column), margin + 8 + index * columnWidth, y + 14, { maxWidth: columnWidth - 12 });
+  });
+  y += 28;
+
+  safeRows.slice(0, maxRows).forEach((row, rowIndex) => {
+    y = ensurePdfSpace(pdf, y, 24, margin, orientation);
+    if (rowIndex % 2 === 0) {
+      pdf.setFillColor(247, 249, 252);
+      pdf.roundedRect(margin, y - 2, availableWidth, 22, 8, 8, "F");
+    }
+    pdf.setFont("helvetica", "normal");
+    pdf.setFontSize(8.5);
+    pdf.setTextColor(52, 58, 74);
+    columns.forEach((column, index) => {
+      pdf.text(formatPdfCellValue(row[column], column), margin + 8 + index * columnWidth, y + 12, {
+        maxWidth: columnWidth - 12,
+      });
+    });
+    y += 24;
+  });
+
+  if (safeRows.length > maxRows) {
+    pdf.setFont("helvetica", "italic");
+    pdf.setFontSize(9);
+    pdf.setTextColor(110, 118, 138);
+    pdf.text(`Exibindo ${maxRows} de ${safeRows.length} linhas nesta visualização.`, margin, y + 8);
+    y += 20;
+  }
+
+  return y + 6;
+};
+
+const drawPresentationBars = (pdf, rows, x, y, width, height) => {
+  const labelKey = findPrimaryLabelKey(rows);
+  const valueKey = findPrimaryValueKey(rows);
+  const topRows = (rows || [])
+    .filter((row) => typeof row[valueKey] === "number" && Number.isFinite(row[valueKey]))
+    .sort((a, b) => b[valueKey] - a[valueKey])
+    .slice(0, 5);
+
+  pdf.setFillColor(255, 255, 255);
+  pdf.roundedRect(x, y, width, height, 18, 18, "F");
+  pdf.setFont("helvetica", "bold");
+  pdf.setFontSize(14);
+  pdf.setTextColor(24, 31, 46);
+  pdf.text("Leitura visual resumida", x + 18, y + 24);
+
+  if (!labelKey || !valueKey || topRows.length === 0) {
+    pdf.setFont("helvetica", "italic");
+    pdf.setFontSize(10);
+    pdf.setTextColor(110, 118, 138);
+    pdf.text("Sem dados numéricos suficientes para montar o resumo visual.", x + 18, y + 48);
+    return;
+  }
+
+  const maxValue = Math.max(...topRows.map((row) => row[valueKey] || 0), 1);
+  topRows.forEach((row, index) => {
+    const lineY = y + 54 + index * 34;
+    const barWidth = ((row[valueKey] || 0) / maxValue) * (width - 190);
+    pdf.setFont("helvetica", "normal");
+    pdf.setFontSize(9);
+    pdf.setTextColor(52, 58, 74);
+    pdf.text(String(row[labelKey]), x + 18, lineY, { maxWidth: 150 });
+    pdf.setFillColor(226, 232, 240);
+    pdf.roundedRect(x + 170, lineY - 8, width - 190, 12, 6, 6, "F");
+    pdf.setFillColor(86, 117, 183);
+    pdf.roundedRect(x + 170, lineY - 8, Math.max(8, barWidth), 12, 6, 6, "F");
+    pdf.setFont("helvetica", "bold");
+    pdf.text(formatPdfCellValue(row[valueKey], valueKey), x + width - 90, lineY, { align: "right" });
+  });
+};
+
+const downloadPresentationPdf = (fileName, options = {}) => {
+  const pdf = new jsPDF({
+    orientation: "landscape",
+    unit: "pt",
+    format: "a4",
+  });
+  const pageWidth = pdf.internal.pageSize.getWidth();
+  const pageHeight = pdf.internal.pageSize.getHeight();
+  const margin = 34;
+  const { highlights, bullets } = buildExportInsights(options.sheets || [], options.metricLabel);
+  const firstRows = options.sheets?.[0]?.rows || [];
+
+  pdf.setFillColor(12, 22, 45);
+  pdf.rect(0, 0, pageWidth, pageHeight, "F");
+  pdf.setFillColor(86, 117, 183);
+  pdf.roundedRect(margin, margin, pageWidth - margin * 2, 86, 20, 20, "F");
+  pdf.setFont("helvetica", "bold");
+  pdf.setFontSize(24);
+  pdf.setTextColor(255, 255, 255);
+  pdf.text(options.reportTitle || "Modo Apresentação", margin + 24, margin + 34);
+  pdf.setFont("helvetica", "normal");
+  pdf.setFontSize(12);
+  pdf.text(`Período selecionado: ${options.periodLabel || "--"}`, margin + 24, margin + 58);
+  pdf.text(`Métrica analisada: ${options.metricLabel || "--"}`, margin + 24, margin + 76);
+
+  let y = margin + 114;
+  y = drawPdfHighlights(pdf, highlights, margin, y, pageWidth - margin * 2);
+
+  pdf.setFillColor(255, 255, 255);
+  pdf.roundedRect(margin, y, 330, 168, 18, 18, "F");
+  pdf.setFont("helvetica", "bold");
+  pdf.setFontSize(15);
+  pdf.setTextColor(24, 31, 46);
+  pdf.text("Resumo executivo", margin + 18, y + 26);
+  pdf.setFont("helvetica", "normal");
+  pdf.setFontSize(11);
+  let bulletY = y + 52;
+  bullets.forEach((bullet) => {
+    pdf.setFillColor(216, 49, 62);
+    pdf.circle(margin + 22, bulletY - 4, 3, "F");
+    pdf.setTextColor(52, 58, 74);
+    const lines = pdf.splitTextToSize(bullet, 274);
+    pdf.text(lines, margin + 36, bulletY);
+    bulletY += lines.length * 14 + 10;
+  });
+
+  drawPresentationBars(pdf, firstRows, margin + 348, y, pageWidth - margin * 2 - 348, 168);
+
+  pdf.addPage("a4", "landscape");
+  pdf.setFillColor(247, 249, 252);
+  pdf.rect(0, 0, pageWidth, pageHeight, "F");
+  pdf.setFont("helvetica", "bold");
+  pdf.setFontSize(20);
+  pdf.setTextColor(24, 31, 46);
+  pdf.text("Dados de apoio para apresentação", margin, margin + 22);
+  let slideY = margin + 48;
+  (options.sheets || []).slice(0, 2).forEach((sheet, index) => {
+    pdf.setFont("helvetica", "bold");
+    pdf.setFontSize(12);
+    pdf.text(`${index + 1}. ${prettifyExportTitle(sheet?.name)}`, margin, slideY);
+    slideY = drawPdfTable(pdf, sheet?.rows || [], slideY + 10, margin, pageWidth - margin * 2, {
+      orientation: "landscape",
+      maxRows: 8,
+      maxCols: 6,
+    });
+    slideY += 10;
+  });
+
+  pdf.save(`${sanitizeFileName(fileName)}_apresentacao.pdf`);
+};
+
+const downloadStructuredPdf = (fileName, options = {}) => {
+  const pdf = new jsPDF({
+    orientation: "portrait",
+    unit: "pt",
+    format: "a4",
+  });
+  const pageWidth = pdf.internal.pageSize.getWidth();
+  const margin = 36;
+  const usableWidth = pageWidth - margin * 2;
+  let y = margin;
+  const { highlights, bullets } = buildExportInsights(options.sheets || [], options.metricLabel);
+
+  pdf.setFillColor(16, 23, 38);
+  pdf.roundedRect(margin, y, usableWidth, 74, 14, 14, "F");
+  pdf.setFont("helvetica", "bold");
+  pdf.setFontSize(18);
+  pdf.setTextColor(255, 255, 255);
+  pdf.text(options.reportTitle || "Relatório de Exportação", margin + 18, y + 28);
+  pdf.setFont("helvetica", "normal");
+  pdf.setFontSize(10);
+  pdf.setTextColor(214, 221, 232);
+  pdf.text(`Período: ${options.periodLabel || "--"}`, margin + 18, y + 48);
+  pdf.text(`Métrica: ${options.metricLabel || "--"}`, margin + 18, y + 63);
+  y += 98;
+
+  y = drawPdfHighlights(pdf, highlights, margin, y, usableWidth);
+
+  pdf.setFont("helvetica", "bold");
+  pdf.setFontSize(12);
+  pdf.setTextColor(24, 31, 46);
+  pdf.text("Leitura do recorte", margin, y);
+  y += 18;
+
+  pdf.setFont("helvetica", "normal");
+  pdf.setFontSize(10);
+  pdf.setTextColor(82, 90, 108);
+  bullets.forEach((bullet) => {
+    pdf.setFillColor(216, 49, 62);
+    pdf.circle(margin + 4, y - 4, 2.5, "F");
+    y = addPdfWrappedText(pdf, bullet, margin + 14, y, usableWidth - 14, 14) + 6;
+  });
+
+  (options.sheets || []).forEach((sheet, index) => {
+    y = ensurePdfSpace(pdf, y, 90, margin, "portrait");
+    pdf.setFont("helvetica", "bold");
+    pdf.setFontSize(11);
+    pdf.setTextColor(24, 31, 46);
+    pdf.text(`${index + 1}. ${prettifyExportTitle(sheet?.name)}`, margin, y);
+    y += 8;
+    y = drawPdfTable(pdf, sheet?.rows || [], y + 6, margin, usableWidth, {
+      orientation: "portrait",
+      maxRows: 10,
+      maxCols: 5,
+    });
+    y += 12;
+  });
+  pdf.save(`${sanitizeFileName(fileName)}.pdf`);
+};
+
 function formatValueAndPercentLine(value, percent) {
   const safeValue = Number(value || 0);
   const safePercent = Number(percent || 0);
+  const roundedPercent = Number.isFinite(safePercent) ? Number(safePercent.toFixed(1)) : 0;
 
-  if (safeValue === 0 && safePercent === 0) return "";
-  if (safePercent === 0) return fmtCurrency(safeValue);
+  if (safeValue === 0 && roundedPercent === 0) return "";
+  if (roundedPercent === 0) return fmtCurrency(safeValue);
   if (safeValue === 0) return fmtPercent(safePercent);
   return `${fmtPercent(safePercent)} | ${fmtCurrency(safeValue)}`;
 }
@@ -172,8 +565,7 @@ function aggregateBy(records, key, metricKey, limit = 10, groupOthers = false) {
 function buildPieSegments(items, selectedLabels = null, primaryLabel = null) {
   const total = items.reduce((acc, item) => acc + item.value, 0) || 1;
   let current = 0;
-  // Professional BI color palette
-  const colors = ["#3B82F6", "#10B981", "#F59E0B", "#EF4444", "#8B5CF6", "#EC4899", "#F97316", "#06B6D4"];
+  const colors = ["#5675B7", "#12844C", "#D8313E", "#666666", "#7E90C7", "#3C9C63", "#E8848D", "#B7C6E5"];
 
   const segments = items.map((item, index) => {
     const start = current;
@@ -227,6 +619,151 @@ function buildDistributionRelations(records, sourceKey, targetKey, metricKey) {
 
       return [sourceLabel, { total, items }];
     })
+  );
+}
+
+function buildVariationRowsForExport({
+  rows,
+  valueKey = "year",
+  showIPCA = false,
+  ipcaAnnual = IPCA_ANUAL_FALLBACK,
+  ipcaMonthly = IPCA_MENSAL_FALLBACK,
+}) {
+  return rows.map((current, index) => {
+    const previous = rows[index - 1];
+    const variation = previous?.value ? ((current.value - previous.value) / previous.value) * 100 : Number.NaN;
+    const rawIpcaValue =
+      showIPCA && valueKey === "year"
+        ? ipcaAnnual[String(current[valueKey]).substring(0, 4)]
+        : showIPCA && valueKey === "period"
+          ? ipcaMonthly[String(current[valueKey])]
+          : null;
+    const ipcaValue = Number.isFinite(rawIpcaValue) ? rawIpcaValue : null;
+    const dissonance = ipcaValue !== null && !Number.isNaN(variation) ? variation - ipcaValue : null;
+
+    return {
+      ...current,
+      variation,
+      ipcaValue,
+      dissonance,
+    };
+  });
+}
+
+function DownloadIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+      <path
+        d="M12 3v10m0 0 4-4m-4 4-4-4M5 17v1a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-1"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.9"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
+function ChevronDownIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+      <path
+        d="m6 9 6 6 6-6"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="2"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
+function ExportMenu({ label = "Exportar", onSelectFormat, busy = false }) {
+  const [isOpen, setIsOpen] = useState(false);
+  const menuRef = useRef(null);
+
+  useEffect(() => {
+    if (!isOpen) return undefined;
+
+    const handleOutsideClick = (event) => {
+      if (menuRef.current?.contains(event.target)) return;
+      setIsOpen(false);
+    };
+
+    document.addEventListener("pointerdown", handleOutsideClick);
+    return () => document.removeEventListener("pointerdown", handleOutsideClick);
+  }, [isOpen]);
+
+  const handleSelect = async (format) => {
+    setIsOpen(false);
+    await onSelectFormat?.(format);
+  };
+
+  return (
+    <div ref={menuRef} className="bi-export-menu" data-export-ignore="true">
+      <button
+        type="button"
+        className="bi-export-trigger"
+        onClick={() => setIsOpen((current) => !current)}
+        disabled={busy}
+        aria-label={busy ? "Exportando" : label}
+        title={busy ? "Exportando" : label}
+      >
+        {busy ? (
+          <span className="bi-export-trigger-text">Exportando...</span>
+        ) : (
+          <>
+            <DownloadIcon />
+            <span className="bi-export-trigger-label">{label}</span>
+            <ChevronDownIcon />
+          </>
+        )}
+      </button>
+      {isOpen ? (
+        <div className="bi-export-options">
+          <button type="button" onClick={() => handleSelect("pdf")}>PDF</button>
+          <button type="button" onClick={() => handleSelect("slides")}>Apresentação</button>
+          <button type="button" onClick={() => handleSelect("jpg")}>JPG</button>
+          <button type="button" onClick={() => handleSelect("xlsx")}>Excel</button>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function ExportableBlock({
+  title,
+  targetRef,
+  sheets,
+  onExport,
+  busy = false,
+  buttonLabel = "Exportar",
+  variant = "panel",
+  children,
+}) {
+  if (variant === "section") {
+    return (
+      <div className={`bi-export-scope bi-export-scope--${variant}`}>
+        <div ref={targetRef}>{children}</div>
+      </div>
+    );
+  }
+
+  return (
+    <div className={`bi-export-scope bi-export-scope--${variant}`}>
+      <div ref={targetRef} className="bi-export-frame">
+        {children}
+        <div className="bi-export-toolbar" data-export-ignore="true">
+          <ExportMenu
+            label={buttonLabel}
+            busy={busy}
+            onSelectFormat={(format) => onExport?.({ title, format, targetRef, sheets })}
+          />
+        </div>
+      </div>
+    </div>
   );
 }
 
@@ -541,6 +1078,10 @@ function TopUgTrendLinesPanel({
   onSelectPeriod,
   selectedSeriesLabel,
   onSelectSeries,
+  dominantLabel = "UG dominante",
+  monitoredLabel = "UGs monitoradas",
+  detailLabel = "subelementos",
+  emptyDetailMessage = "Sem itens para o recorte selecionado.",
 }) {
   // Configuração de dimensões
   const isMonthlySeries = periods.some((period) => String(period.periodKey).includes("-"));
@@ -610,6 +1151,14 @@ function TopUgTrendLinesPanel({
       focusTotal: rankedSeries.reduce((acc, line) => acc + line.focusValue, 0),
     };
   }, [activePeriod, periods, series]);
+  const referencePeriodLabel = activePeriodLabel || overview.focusPeriod?.fullLabel || "--";
+  const previousReferenceLabel = isMonthlySeries ? "mês anterior" : "ano anterior";
+  const dominantPeriodLabel = activePeriodLabel
+    ? `${dominantLabel} em ${activePeriodLabel}`
+    : `${dominantLabel} no último período`;
+  const totalPeriodLabel = activePeriodLabel
+    ? `Total das Top 10 em ${activePeriodLabel}`
+    : "Total das Top 10 no último período";
 
   const tooltipData = hoveredPoint
     ? {
@@ -636,6 +1185,16 @@ function TopUgTrendLinesPanel({
     selectedSeries?.topSubelementsByPeriod?.get(detailPeriodKey) ||
     selectedSeries?.topSubelementsOverall ||
     [];
+  const detailItems = detailSubelements
+    .slice(0, 10)
+    .map((item) => {
+      const pct = overview.focusTotal > 0 ? (item.value / overview.focusTotal) * 100 : 0;
+      return {
+        ...item,
+        pct,
+      };
+    })
+    .filter((item) => Number(item.pct.toFixed(1)) !== 0);
 
   const handleSelectSeries = (label) => {
     onSelectSeries?.(label);
@@ -656,14 +1215,14 @@ function TopUgTrendLinesPanel({
           <div className="bi-evolution-summary">
             <div className="bi-evolution-kpi">
               <span>Período em foco</span>
-              <strong>{overview.focusPeriod?.fullLabel || "--"}</strong>
+              <strong>{activePeriodLabel ? `${dominantLabel} em ${activePeriodLabel}` : `${dominantLabel} no último período`}</strong>
             </div>
             <div className="bi-evolution-kpi">
-              <span>UG dominante</span>
+              <span>{dominantPeriodLabel}</span>
               <strong>{overview.leader?.label || "--"}</strong>
             </div>
             <div className="bi-evolution-kpi">
-              <span>Total das Top 10</span>
+              <span>{totalPeriodLabel}</span>
               <strong>{fmtCurrency(overview.focusTotal)}</strong>
             </div>
             <div className="bi-evolution-kpi">
@@ -698,14 +1257,14 @@ function TopUgTrendLinesPanel({
           </div>
 
           {tooltipData && (
-            <div className="bi-linechart-tooltip">
-              <span className="bi-linechart-tooltip-dot" style={{ background: tooltipData.accent }} />
-              <div>
-                <strong>{tooltipData.title}</strong>
-                <span>{tooltipData.subtitle}</span>
+              <div className="bi-linechart-tooltip">
+                <span className="bi-linechart-tooltip-dot" style={{ background: tooltipData.accent }} />
+                <div>
+                  <strong>{tooltipData.title}</strong>
+                  <span>{tooltipData.subtitle ? `${dominantLabel} em ${tooltipData.subtitle}` : tooltipData.subtitle}</span>
+                </div>
+                <strong className="bi-linechart-tooltip-value">{tooltipData.value}</strong>
               </div>
-              <strong className="bi-linechart-tooltip-value">{tooltipData.value}</strong>
-            </div>
           )}
 
           <div className="bi-evolution-body">
@@ -847,15 +1406,15 @@ function TopUgTrendLinesPanel({
 
             <section ref={ugPanelRef} className="bi-evolution-ug-panel">
               <div className="bi-evolution-ug-header">
-                <strong>UGs monitoradas</strong>
+                <strong>{monitoredLabel}</strong>
                 <span>{activePeriod ? `Ranking em ${activePeriodLabel}` : "Último período disponível"}</span>
               </div>
 
               <div className="bi-linechart-legend">
                 {overview.rankedSeries.map((line, index) => {
                   const deltaLabel = Number.isNaN(line.delta)
-                    ? "Sem base anterior"
-                    : `${line.delta >= 0 ? "+" : ""}${line.delta.toFixed(1)}% vs. anterior`;
+                    ? `Sem base em relação ao ${previousReferenceLabel}`
+                    : `${line.delta >= 0 ? "+" : ""}${line.delta.toFixed(1)}% em relação ao ${previousReferenceLabel}`;
                   const peakPeriodLabel = line.peakPoint
                     ? line.peakPoint.periodKey.includes("-")
                       ? formatPeriodLabel(line.peakPoint.periodKey)
@@ -873,34 +1432,34 @@ function TopUgTrendLinesPanel({
                     >
                       <span className="bi-linechart-rank">{index + 1}</span>
                       <span className="bi-linechart-swatch" style={{ background: line.color }} />
-                      <div className="bi-linechart-info">
-                        <strong>{line.label}</strong>
-                        <span>{activePeriod ? `No período: ${fmtCurrency(line.focusValue)}` : `Último período: ${fmtCurrency(line.focusValue)}`}</span>
-                        <span>{deltaLabel}</span>
-                        <span>Pico: {fmtCurrency(line.peakPoint?.value || 0)} em {peakPeriodLabel}</span>
-                      </div>
+                        <div className="bi-linechart-info">
+                          <strong>{line.label}</strong>
+                          <span>{`No período selecionado: ${fmtCurrency(line.focusValue)}`}</span>
+                          <span>{deltaLabel}</span>
+                          <span>Pico: {fmtCurrency(line.peakPoint?.value || 0)} em {peakPeriodLabel}</span>
+                        </div>
                     </button>
                   );
                 })}
               </div>
               <div ref={detailPanelRef} className="bi-evolution-detail-panel">
                 <div className="bi-evolution-detail-header">
-                  <strong>{selectedSeries?.label || "Selecione uma UG"}</strong>
-                  <span>Top 10 subelementos em {detailPeriodLabel}</span>
+                  <strong>{selectedSeries?.label || `Selecione ${dominantLabel.toLowerCase().replace(" dominante", "")}`}</strong>
+                  <span>{`Top 10 ${detailLabel} em ${detailPeriodLabel}`}</span>
                 </div>
                 <div className="bi-evolution-detail-list">
-                  {detailSubelements.length > 0 ? (
-                    detailSubelements.slice(0, 10).map((item, index) => (
+                  {detailItems.length > 0 ? (
+                    detailItems.map((item, index) => (
                       <div key={`${selectedSeries?.label || "ug"}-${item.label}`} className="bi-evolution-detail-item">
                         <span className="bi-evolution-detail-rank">{String(index + 1).padStart(2, "0")}</span>
                         <div className="bi-evolution-detail-copy">
                           <strong>{item.label}</strong>
-                          <span>{fmtCurrency(item.value)}</span>
+                          <span>{formatValueAndPercentLine(item.value, item.pct)}</span>
                         </div>
                       </div>
                     ))
                   ) : (
-                    <div className="bi-evolution-detail-empty">Sem subelementos para o recorte selecionado.</div>
+                    <div className="bi-evolution-detail-empty">{emptyDetailMessage}</div>
                   )}
                 </div>
               </div>
@@ -980,32 +1539,21 @@ function VariationTable({
     return "";
   };
 
-  const withVariation = rows.map((current, index) => {
-      const previous = rows[index - 1];
-      const variation = previous?.value ? ((current.value - previous.value) / previous.value) * 100 : Number.NaN;
-      const rawIpcaValue =
-        showIPCA && valueKey === "year"
-          ? ipcaAnnual[String(current[valueKey]).substring(0, 4)]
-          : showIPCA && valueKey === "period"
-            ? ipcaMonthly[String(current[valueKey])]
-            : null;
-    const ipcaValue = Number.isFinite(rawIpcaValue) ? rawIpcaValue : null;
-    const dissonance = ipcaValue !== null && !Number.isNaN(variation) ? variation - ipcaValue : null;
-
+  const withVariation = buildVariationRowsForExport({
+    rows,
+    valueKey,
+    showIPCA,
+    ipcaAnnual,
+    ipcaMonthly,
+  }).map((row) => {
     let dissonanceColor = "";
-    if (dissonance !== null) {
-      if (dissonance <= 0) dissonanceColor = "positive";
-      else if (dissonance <= 2) dissonanceColor = "warning";
+    if (row.dissonance !== null) {
+      if (row.dissonance <= 0) dissonanceColor = "positive";
+      else if (row.dissonance <= 2) dissonanceColor = "warning";
       else dissonanceColor = "negative";
     }
 
-    return {
-      ...current,
-      variation,
-      ipcaValue,
-      dissonance,
-      dissonanceColor,
-    };
+    return { ...row, dissonanceColor };
   });
   const formatRowLabel = (row) => (valueKey === "period" ? formatPeriodLabel(row[valueKey]) : row[valueKey]);
 
@@ -1453,6 +2001,43 @@ export default function CusteioDashboard() {
   const { user } = useAuth();
   const distributionSectionRef = useRef(null);
   const rankingSectionRef = useRef(null);
+  const overviewMainSectionExportRef = useRef(null);
+  const overviewRankingSectionExportRef = useRef(null);
+  const overviewInsightsSectionExportRef = useRef(null);
+  const overviewAnnualExportRef = useRef(null);
+  const overviewVariationExportRef = useRef(null);
+  const overviewTopUgExportRef = useRef(null);
+  const overviewTopSubExportRef = useRef(null);
+  const overviewSummaryExportRef = useRef(null);
+  const overviewInsightsExportRef = useRef(null);
+  const monthlyMainSectionExportRef = useRef(null);
+  const monthlySummarySectionExportRef = useRef(null);
+  const monthlyVariationSectionExportRef = useRef(null);
+  const monthlySeriesExportRef = useRef(null);
+  const monthlyVariationExportRef = useRef(null);
+  const monthlySummaryExportRef = useRef(null);
+  const monthlyHighlightsMonthExportRef = useRef(null);
+  const monthlyHighlightsVariationExportRef = useRef(null);
+  const distributionGridExportRef = useRef(null);
+  const distributionRelationsExportRef = useRef(null);
+  const distributionSubExportRef = useRef(null);
+  const distributionUgExportRef = useRef(null);
+  const distributionRelationCardExportRef = useRef(null);
+  const trendsSectionExportRef = useRef(null);
+  const trendsSubExportRef = useRef(null);
+  const trendsUgExportRef = useRef(null);
+  const matrixSectionExportRef = useRef(null);
+  const matrixSubExportRef = useRef(null);
+  const matrixUgExportRef = useRef(null);
+  const evolutionSectionExportRef = useRef(null);
+  const evolutionPanelExportRef = useRef(null);
+  const evolutionSubPanelExportRef = useRef(null);
+  const alertsTopSectionExportRef = useRef(null);
+  const alertsTablesSectionExportRef = useRef(null);
+  const alertsConfigExportRef = useRef(null);
+  const alertsInsightsExportRef = useRef(null);
+  const alertsPeriodExportRef = useRef(null);
+  const alertsHistoricalExportRef = useRef(null);
   const fixedPeriodStartInput = "01/01/2021";
   const currentDateInput = new Intl.DateTimeFormat("pt-BR", {
     timeZone: "America/Sao_Paulo",
@@ -1473,7 +2058,9 @@ export default function CusteioDashboard() {
   const [selectedPeriodEndInput, setSelectedPeriodEndInput] = useState(currentDateInput);
   const [selectedRankingPeriod, setSelectedRankingPeriod] = useState(null);
   const [selectedEvolutionUg, setSelectedEvolutionUg] = useState(null);
+  const [selectedEvolutionSubelement, setSelectedEvolutionSubelement] = useState(null);
   const [evolutionType, setEvolutionType] = useState("monthly");
+  const [evolutionView, setEvolutionView] = useState("ug");
   const ugQuantity = 10; // Fixed at 10
   const [alertThreshold, setAlertThreshold] = useState(10);
   const [alertGrouping, setAlertGrouping] = useState("subelemento");
@@ -1485,6 +2072,7 @@ export default function CusteioDashboard() {
   const [elementoSearch, setElementoSearch] = useState("");
   const [subelementoSearch, setSubelementoSearch] = useState("");
   const [unidadeSearch, setUnidadeSearch] = useState("");
+  const [exportingKey, setExportingKey] = useState(null);
   const deferredMatrixSearch = useDeferredValue(matrixSearch);
 
   useEffect(() => {
@@ -1512,6 +2100,21 @@ export default function CusteioDashboard() {
     document.addEventListener("pointerdown", handleOutsideClick);
     return () => document.removeEventListener("pointerdown", handleOutsideClick);
   }, [activeTab, selectedSubelementInRanking, selectedUgInRanking]);
+
+  useEffect(() => {
+    if (activeTab !== "ugRanking") return undefined;
+    if (!selectedRankingPeriod && !selectedEvolutionUg && !selectedEvolutionSubelement) return undefined;
+
+    const handleOutsideClick = (event) => {
+      if (evolutionSectionExportRef.current?.contains(event.target)) return;
+      setSelectedRankingPeriod(null);
+      setSelectedEvolutionUg(null);
+      setSelectedEvolutionSubelement(null);
+    };
+
+    document.addEventListener("pointerdown", handleOutsideClick);
+    return () => document.removeEventListener("pointerdown", handleOutsideClick);
+  }, [activeTab, selectedEvolutionSubelement, selectedEvolutionUg, selectedRankingPeriod]);
 
   const refreshDashboard = useCallback(async () => {
     try {
@@ -2055,6 +2658,75 @@ export default function CusteioDashboard() {
     return { periods, series };
   }, [activeTab, monthlyVisibleTotals, selectedMetric, topUnidades, visibleRecords, ugQuantity, evolutionType, years]);
 
+  const topSubelementTrendSeries = useMemo(() => {
+    if (activeTab !== "ugRanking") {
+      return { periods: [], series: [] };
+    }
+
+    if (topSubelementos.length === 0) {
+      return { periods: [], series: [] };
+    }
+
+    let periods = [];
+    if (evolutionType === "monthly") {
+      periods = monthlyVisibleTotals.map((item) => ({
+        periodKey: item.periodKey,
+        shortLabel: formatPeriodLabel(item.periodKey),
+        fullLabel: formatPeriodLabel(item.periodKey),
+      }));
+    } else {
+      periods = years.map((year) => ({
+        periodKey: String(year),
+        shortLabel: String(year),
+        fullLabel: String(year),
+      }));
+    }
+
+    if (periods.length === 0) return { periods: [], series: [] };
+
+    const colors = ["#38BDF8", "#10B981", "#F59E0B", "#F97316", "#A78BFA", "#FB7185", "#22C55E", "#EAB308", "#60A5FA", "#F472B6"];
+    const periodValueMap = new Map();
+
+    visibleRecords.forEach((record) => {
+      if (!topSubelementos.slice(0, ugQuantity).some((item) => item.label === record.subelementoLabel)) {
+        return;
+      }
+
+      const periodKey = evolutionType === "monthly" ? record.periodKey : String(record.year);
+      const mapKey = `${record.subelementoLabel}::${periodKey}`;
+      periodValueMap.set(mapKey, (periodValueMap.get(mapKey) || 0) + record[selectedMetric]);
+    });
+
+    const series = topSubelementos.slice(0, ugQuantity).map((subelemento, index) => {
+      const points = periods.map((period) => ({
+        periodKey: period.periodKey,
+        value: periodValueMap.get(`${subelemento.label}::${period.periodKey}`) || 0,
+      }));
+
+      const subelementoRecords = visibleRecords.filter((r) => r.subelementoLabel === subelemento.label);
+      const topSubelementsOverall = aggregateBy(subelementoRecords, "unidadeGestoraLabel", selectedMetric, 10);
+      const topSubelementsByPeriod = new Map(
+        periods.map((period) => {
+          const scopedRecords = subelementoRecords.filter((record) =>
+            evolutionType === "monthly" ? record.periodKey === period.periodKey : String(record.year) === period.periodKey
+          );
+          return [period.periodKey, aggregateBy(scopedRecords, "unidadeGestoraLabel", selectedMetric, 10)];
+        })
+      );
+
+      return {
+        label: subelemento.label,
+        total: subelemento.value,
+        color: colors[index % colors.length],
+        points,
+        topSubelementsOverall,
+        topSubelementsByPeriod,
+      };
+    });
+
+    return { periods, series };
+  }, [activeTab, evolutionType, monthlyVisibleTotals, selectedMetric, topSubelementos, ugQuantity, visibleRecords, years]);
+
   const monthlyRangeSummary = useMemo(() => {
     if (monthlyVariationRows.length === 0) {
       return { firstPeriod: null, lastPeriod: null };
@@ -2120,6 +2792,32 @@ export default function CusteioDashboard() {
       setSelectedEvolutionUg(topUgTrendSeries.series[0]?.label || null);
     }
   }, [activeTab, selectedEvolutionUg, selectedRankingPeriod, topUgTrendSeries.series]);
+
+  useEffect(() => {
+    if (activeTab !== "ugRanking") return;
+    if (topSubelementTrendSeries.series.length === 0) {
+      setSelectedEvolutionSubelement(null);
+      return;
+    }
+
+    if (selectedRankingPeriod) {
+      const leaderForPeriod = [...topSubelementTrendSeries.series]
+        .map((line) => ({
+          label: line.label,
+          value: line.points.find((point) => point.periodKey === selectedRankingPeriod)?.value || 0,
+        }))
+        .sort((a, b) => b.value - a.value)[0];
+
+      if (leaderForPeriod?.label) {
+        setSelectedEvolutionSubelement(leaderForPeriod.label);
+        return;
+      }
+    }
+
+    if (!selectedEvolutionSubelement || !topSubelementTrendSeries.series.some((line) => line.label === selectedEvolutionSubelement)) {
+      setSelectedEvolutionSubelement(topSubelementTrendSeries.series[0]?.label || null);
+    }
+  }, [activeTab, selectedEvolutionSubelement, selectedRankingPeriod, topSubelementTrendSeries.series]);
 
   const effectiveAlertStartPeriod = selectedPeriodStart === "all" ? visiblePeriods[0]?.periodKey || null : selectedPeriodStart;
   const effectiveAlertEndPeriod =
@@ -2302,6 +3000,308 @@ export default function CusteioDashboard() {
     ];
   }, [monthlyVariationRows, selectedMetric, visibleRecords]);
 
+  const exportPeriodLabel = useMemo(() => {
+    const start = selectedPeriodStartInput?.replaceAll("/", "-") || "inicio";
+    const end = selectedPeriodEndInput?.replaceAll("/", "-") || "fim";
+    return `${start}_a_${end}`;
+  }, [selectedPeriodEndInput, selectedPeriodStartInput]);
+
+  const buildInsightRows = useCallback((cards) => (
+    (cards || []).map((card) => ({
+      Indicador: card.label,
+      Valor: card.value,
+    }))
+  ), []);
+
+  const buildRankingRows = useCallback((items, referenceTotal = null) => {
+    const total = Number.isFinite(referenceTotal) && referenceTotal > 0
+      ? referenceTotal
+      : (items || []).reduce((acc, item) => acc + item.value, 0);
+
+    return (items || []).map((item, index) => ({
+      Posição: index + 1,
+      Item: item.label,
+      Valor: item.value,
+      "Valor Formatado": fmtCurrency(item.value),
+      Percentual: total > 0 ? (item.value / total) * 100 : 0,
+      "Percentual Formatado": total > 0 ? fmtPercent((item.value / total) * 100) : "--",
+    }));
+  }, []);
+
+  const buildTrendSeriesRows = useCallback((seriesData, periods) => {
+    return (periods || []).map((periodKey) => {
+      const row = {
+        Período: formatPeriodLabel(periodKey),
+        Chave: periodKey,
+      };
+
+      (seriesData || []).forEach((line) => {
+        row[line.label] = line.points.find((point) => point.periodKey === periodKey)?.value || 0;
+      });
+
+      return row;
+    });
+  }, []);
+
+  const buildMatrixExportRows = useCallback((rows, yearsList) => {
+    return (rows || []).map((row) => {
+      const exportRow = { Categoria: row.label };
+      (yearsList || []).forEach((year, index) => {
+        exportRow[String(year)] = row.yearValues[index] || 0;
+      });
+      exportRow.Total = row.total;
+      return exportRow;
+    });
+  }, []);
+
+  const buildAlertExportRows = useCallback((rows, baseLabel, compareLabel, totalValue) => {
+    return (rows || []).map((row) => {
+      const compareVal = row.endValue ?? row.currentValue;
+      const impact = totalValue > 0 ? (compareVal / totalValue) * 100 : 0;
+      return {
+        Categoria: row.label,
+        [baseLabel]: row.startValue ?? row.averageValue,
+        [compareLabel]: compareVal,
+        "Variação %": row.variationPercent,
+        "Variação Formatada": row.variationLabel,
+        "Impacto %": impact,
+        Diferença: row.deltaValue,
+        "Em Alerta": row.exceededThreshold ? "Sim" : "Não",
+      };
+    });
+  }, []);
+
+  const handleExportBlock = useCallback(async ({ title, format, targetRef, sheets }) => {
+    const key = `${format}:${title}`;
+    const fileBaseName = `custeio_${activeTab}_${title}_${exportPeriodLabel}`;
+    const currentTabLabel = PAGE_TABS.find((tab) => tab.key === activeTab)?.label || activeTab;
+    const readablePeriodLabel = `${selectedPeriodStartInput || "--"} a ${selectedPeriodEndInput || "--"}`;
+
+    try {
+      setExportingKey(key);
+
+      if (format === "xlsx") {
+        downloadWorkbook(sheets, fileBaseName);
+        return;
+      }
+
+      if (format === "slides") {
+        downloadPresentationPdf(fileBaseName, {
+          reportTitle: `${currentTabLabel} · ${prettifyExportTitle(title)}`,
+          panelLabel: prettifyExportTitle(title),
+          periodLabel: readablePeriodLabel,
+          metricLabel: currentMetricLabel,
+          sheets,
+        });
+        return;
+      }
+
+      if (format === "pdf") {
+        downloadStructuredPdf(fileBaseName, {
+          reportTitle: `${currentTabLabel} · ${prettifyExportTitle(title)}`,
+          panelLabel: prettifyExportTitle(title),
+          periodLabel: readablePeriodLabel,
+          metricLabel: currentMetricLabel,
+          sheets,
+        });
+        return;
+      }
+
+      const canvas = await captureElementCanvas(targetRef?.current);
+      if (format === "jpg") {
+        downloadCanvasAsJpg(canvas, fileBaseName);
+        return;
+      }
+    } catch (error) {
+      console.error(error);
+      window.alert("Não foi possível concluir a exportação deste bloco.");
+    } finally {
+      setExportingKey(null);
+    }
+  }, [activeTab, currentMetricLabel, exportPeriodLabel, selectedPeriodEndInput, selectedPeriodStartInput]);
+
+  const exportBundles = useMemo(() => {
+    const annualVariationRows = buildVariationRowsForExport({
+      rows: yearlyVisibleTotals,
+      showIPCA: true,
+      ipcaAnnual,
+      ipcaMonthly,
+    }).map((row) => ({
+      Ano: row.year,
+      Total: row.value,
+      "Total Formatado": fmtCurrency(row.value),
+      "Variação %": row.variation,
+      "Variação Formatada": fmtPercent(row.variation),
+      IPCA: row.ipcaValue,
+      Dissonância: row.dissonance,
+    }));
+
+    const monthlyVariationExportRows = buildVariationRowsForExport({
+      rows: monthlyVariationRows,
+      valueKey: "period",
+      showIPCA: true,
+      ipcaAnnual,
+      ipcaMonthly,
+    }).map((row) => ({
+      Mês: formatPeriodLabel(row.period),
+      Chave: row.period,
+      Total: row.value,
+      "Total Formatado": fmtCurrency(row.value),
+      "Variação %": row.variation,
+      "Variação Formatada": fmtPercent(row.variation),
+      IPCA: row.ipcaValue,
+      Dissonância: row.dissonance,
+    }));
+
+    const annualSummaryRows = annualRangeSummary
+      ? [
+          { Indicador: annualRangeSummary.firstLabel, Valor: annualRangeSummary.firstValue, "Valor Formatado": fmtCurrency(annualRangeSummary.firstValue) },
+          { Indicador: annualRangeSummary.lastLabel, Valor: annualRangeSummary.lastValue, "Valor Formatado": fmtCurrency(annualRangeSummary.lastValue) },
+          {
+            Indicador: "Variação Total em Valor",
+            Valor: annualRangeSummary.lastValue - annualRangeSummary.firstValue,
+            "Valor Formatado": fmtCurrency(annualRangeSummary.lastValue - annualRangeSummary.firstValue),
+          },
+          {
+            Indicador: "Variação Total em Percentual",
+            Valor:
+              annualRangeSummary.firstValue > 0
+                ? ((annualRangeSummary.lastValue - annualRangeSummary.firstValue) / annualRangeSummary.firstValue) * 100
+                : Number.NaN,
+            "Valor Formatado":
+              annualRangeSummary.firstValue > 0
+                ? fmtPercent(((annualRangeSummary.lastValue - annualRangeSummary.firstValue) / annualRangeSummary.firstValue) * 100)
+                : "--",
+          },
+        ]
+      : [];
+
+    const monthlySummaryRows = monthlyRangeSummary.firstPeriod && monthlyRangeSummary.lastPeriod
+      ? [
+          {
+            Indicador: monthlyRangeSummary.firstPeriod.label,
+            Valor: monthlyRangeSummary.firstPeriod.value,
+            "Valor Formatado": fmtCurrency(monthlyRangeSummary.firstPeriod.value),
+          },
+          {
+            Indicador: monthlyRangeSummary.lastPeriod.label,
+            Valor: monthlyRangeSummary.lastPeriod.value,
+            "Valor Formatado": fmtCurrency(monthlyRangeSummary.lastPeriod.value),
+          },
+          {
+            Indicador: "Variação Total em Valor",
+            Valor: monthlyRangeSummary.lastPeriod.value - monthlyRangeSummary.firstPeriod.value,
+            "Valor Formatado": fmtCurrency(monthlyRangeSummary.lastPeriod.value - monthlyRangeSummary.firstPeriod.value),
+          },
+          {
+            Indicador: "Variação Total em Percentual",
+            Valor:
+              monthlyRangeSummary.firstPeriod.value > 0
+                ? ((monthlyRangeSummary.lastPeriod.value - monthlyRangeSummary.firstPeriod.value) / monthlyRangeSummary.firstPeriod.value) * 100
+                : Number.NaN,
+            "Valor Formatado":
+              monthlyRangeSummary.firstPeriod.value > 0
+                ? fmtPercent(((monthlyRangeSummary.lastPeriod.value - monthlyRangeSummary.firstPeriod.value) / monthlyRangeSummary.firstPeriod.value) * 100)
+                : "--",
+          },
+        ]
+      : [];
+
+    const distributionRelationRows = distributionHover?.label === "Outras Despesas"
+      ? distributionSelectionDetails.othersItems.map((item) => ({
+          Item: item.label,
+          Valor: item.value,
+          "Valor Formatado": fmtCurrency(item.value),
+        }))
+      : (distributionSelectionDetails.relationInfo?.items || []).map((item) => ({
+          Item: item.label,
+          Valor: item.value,
+          "Valor Formatado": fmtCurrency(item.value),
+          Percentual: item.pct,
+          "Percentual Formatado": fmtPercent(item.pct),
+        }));
+
+    const evolutionRows = buildTrendSeriesRows(topUgTrendSeries.series, topUgTrendSeries.periods);
+    const evolutionSubRows = buildTrendSeriesRows(topSubelementTrendSeries.series, topSubelementTrendSeries.periods);
+
+    return {
+      overviewAnnual: [{ name: "serie_anual", rows: yearlyVisibleTotals.map((item) => ({ Ano: item.year, Valor: item.value, "Valor Formatado": fmtCurrency(item.value) })) }],
+      overviewVariation: [{ name: "variacao_anual", rows: annualVariationRows }],
+      overviewTopUg: [{ name: "top_ugs", rows: buildRankingRows(topUnidades.slice(0, 10)) }],
+      overviewTopSub: [{ name: "top_subelementos", rows: buildRankingRows(topSubelementos.slice(0, 10)) }],
+      overviewSummary: [{ name: "comparativo", rows: annualSummaryRows }],
+      overviewHighlights: [{ name: "destaques", rows: buildInsightRows(annualHighlights) }],
+      monthlySeries: [{ name: "serie_mensal", rows: monthlyVariationRows.map((item) => ({ Mês: formatPeriodLabel(item.period), Chave: item.period, Valor: item.value, "Valor Formatado": fmtCurrency(item.value) })) }],
+      monthlyVariation: [{ name: "variacao_mensal", rows: monthlyVariationExportRows }],
+      monthlySummary: [{ name: "comparativo_mensal", rows: monthlySummaryRows }],
+      monthlyHighlightsMonth: [{ name: "destaques_mes", rows: buildInsightRows(monthlyHighlightsMaxMonth) }],
+      monthlyHighlightsVariation: [{ name: "maior_variacao", rows: buildInsightRows(monthlyHighlightsMaxVariation) }],
+      distributionSub: [{ name: "distribuicao_subelemento", rows: topSubelementos.map((item) => ({ Item: item.label, Valor: item.value, "Valor Formatado": fmtCurrency(item.value), Percentual: item.pct, "Percentual Formatado": fmtPercent(item.pct) })) }],
+      distributionUg: [{ name: "distribuicao_ug", rows: topUnidades.map((item) => ({ Item: item.label, Valor: item.value, "Valor Formatado": fmtCurrency(item.value), Percentual: item.pct, "Percentual Formatado": fmtPercent(item.pct) })) }],
+      distributionRelations: [{ name: "relacionamentos", rows: distributionRelationRows }],
+      trendsSub: [{ name: "ranking_subelementos", rows: buildRankingRows(rankingSubelementos, rankingSubelementosReferenceTotal) }],
+      trendsUg: [{ name: "ranking_ugs", rows: buildRankingRows(rankingUnidades, rankingUnidadesReferenceTotal) }],
+      matrixSub: [{ name: "matriz_subelemento", rows: buildMatrixExportRows(matrixBySubelemento, years) }],
+      matrixUg: [{ name: "matriz_ug", rows: buildMatrixExportRows(matrixByUnidade, years) }],
+      evolution: [
+        { name: "evolucao_ugs", rows: evolutionRows },
+        { name: "evolucao_subelementos", rows: evolutionSubRows },
+      ],
+      alertsConfig: [{
+        name: "configuracao_alertas",
+        rows: [
+          { Campo: "Agrupamento", Valor: alertGrouping },
+          { Campo: "Limite de Alerta (%)", Valor: alertThreshold },
+          { Campo: "Período Inicial", Valor: effectiveAlertStartPeriod || "--" },
+          { Campo: "Período Final", Valor: effectiveAlertEndPeriod || "--" },
+        ],
+      }],
+      alertsInsights: [{ name: "insights_alertas", rows: buildInsightRows(alertInsightCards) }],
+      alertsPeriod: [{ name: "alertas_periodo", rows: buildAlertExportRows(periodComparisonRows.slice(0, 12), effectiveAlertStartPeriod || "Início", effectiveAlertEndPeriod || "Fim", periodEndTotal) }],
+      alertsHistorical: [{ name: "alertas_historicos", rows: buildAlertExportRows(historicalAlertRows.slice(0, 12), "Média 12 Meses", effectiveAlertEndPeriod || "Período Final", periodEndTotal) }],
+    };
+  }, [
+    alertGrouping,
+    alertInsightCards,
+    alertThreshold,
+    annualHighlights,
+    annualRangeSummary,
+    buildAlertExportRows,
+    buildInsightRows,
+    buildMatrixExportRows,
+    buildRankingRows,
+    buildTrendSeriesRows,
+    distributionHover,
+    distributionSelectionDetails.othersItems,
+    distributionSelectionDetails.relationInfo,
+    effectiveAlertEndPeriod,
+    effectiveAlertStartPeriod,
+    historicalAlertRows,
+    ipcaAnnual,
+    ipcaMonthly,
+    matrixBySubelemento,
+    matrixByUnidade,
+    monthlyHighlightsMaxMonth,
+    monthlyHighlightsMaxVariation,
+    monthlyRangeSummary.firstPeriod,
+    monthlyRangeSummary.lastPeriod,
+    monthlyVariationRows,
+    periodComparisonRows,
+    periodEndTotal,
+    rankingSubelementos,
+    rankingSubelementosReferenceTotal,
+    rankingUnidades,
+    rankingUnidadesReferenceTotal,
+    topSubelementTrendSeries.periods,
+    topSubelementTrendSeries.series,
+    topSubelementos,
+    topUgTrendSeries.periods,
+    topUgTrendSeries.series,
+    topUnidades,
+    years,
+    yearlyVisibleTotals,
+  ]);
+
   const clearFilters = () => {
     setSelectedYear("all");
     setSelectedMetric("vlempenhado");
@@ -2314,6 +3314,8 @@ export default function CusteioDashboard() {
     setSelectedPeriodEndInput(currentDateInput);
     setSelectedRankingPeriod(null);
     setSelectedEvolutionUg(null);
+    setSelectedEvolutionSubelement(null);
+    setEvolutionView("ug");
     setAlertThreshold(10);
     setAlertGrouping("subelemento");
     setGlobalSearch("");
@@ -2526,154 +3528,407 @@ export default function CusteioDashboard() {
 
         {activeTab === "overview" && (
           <>
+            <ExportableBlock
+              title="visao-anual_bloco_principal"
+              targetRef={overviewMainSectionExportRef}
+              sheets={[...exportBundles.overviewAnnual, ...exportBundles.overviewVariation]}
+              onExport={handleExportBlock}
+              busy={exportingKey === "pdf:visao-anual_bloco_principal" || exportingKey === "jpg:visao-anual_bloco_principal" || exportingKey === "xlsx:visao-anual_bloco_principal"}
+              buttonLabel="Baixar bloco"
+              variant="section"
+            >
               <section className="bi-grid bi-grid-main">
-                <AnnualBars items={yearlyVisibleTotals} metricLabel={currentMetricLabel} />
-                <VariationTable rows={yearlyVisibleTotals} showIPCA ipcaAnnual={ipcaAnnual} ipcaMonthly={ipcaMonthly} />
+                <ExportableBlock
+                  title="serie_anual"
+                  targetRef={overviewAnnualExportRef}
+                  sheets={exportBundles.overviewAnnual}
+                  onExport={handleExportBlock}
+                  busy={exportingKey === "pdf:serie_anual" || exportingKey === "jpg:serie_anual" || exportingKey === "xlsx:serie_anual"}
+                >
+                  <AnnualBars items={yearlyVisibleTotals} metricLabel={currentMetricLabel} />
+                </ExportableBlock>
+                <ExportableBlock
+                  title="variacao_anual"
+                  targetRef={overviewVariationExportRef}
+                  sheets={exportBundles.overviewVariation}
+                  onExport={handleExportBlock}
+                  busy={exportingKey === "pdf:variacao_anual" || exportingKey === "jpg:variacao_anual" || exportingKey === "xlsx:variacao_anual"}
+                >
+                  <VariationTable rows={yearlyVisibleTotals} showIPCA ipcaAnnual={ipcaAnnual} ipcaMonthly={ipcaMonthly} />
+                </ExportableBlock>
               </section>
-            <section className="bi-grid">
-              <TopRankingPanel title={`10 UGs com Maior Valor ${currentMetricLabel}`} items={topUnidades} />
-              <TopRankingPanel title={`10 Subelementos com Maior Valor ${currentMetricLabel}`} items={topSubelementos} />
-            </section>
-            <section className="bi-grid">
-              <MonthlySummaryPanel
-                title="Comparativo do Período Selecionado"
-                firstLabel={annualRangeSummary?.firstLabel}
-                lastLabel={annualRangeSummary?.lastLabel}
-                firstValue={annualRangeSummary?.firstValue}
-                lastValue={annualRangeSummary?.lastValue}
-                metricLabel={currentMetricLabel}
-              />
-              <InsightCards cards={annualHighlights} />
-            </section>
+            </ExportableBlock>
+            <ExportableBlock
+              title="visao-anual_bloco_ranking"
+              targetRef={overviewRankingSectionExportRef}
+              sheets={[...exportBundles.overviewTopUg, ...exportBundles.overviewTopSub]}
+              onExport={handleExportBlock}
+              busy={exportingKey === "pdf:visao-anual_bloco_ranking" || exportingKey === "jpg:visao-anual_bloco_ranking" || exportingKey === "xlsx:visao-anual_bloco_ranking"}
+              buttonLabel="Baixar bloco"
+              variant="section"
+            >
+              <section className="bi-grid">
+                <ExportableBlock
+                  title="top_ugs_anual"
+                  targetRef={overviewTopUgExportRef}
+                  sheets={exportBundles.overviewTopUg}
+                  onExport={handleExportBlock}
+                  busy={exportingKey === "pdf:top_ugs_anual" || exportingKey === "jpg:top_ugs_anual" || exportingKey === "xlsx:top_ugs_anual"}
+                >
+                  <TopRankingPanel title={`10 UGs com Maior Valor ${currentMetricLabel}`} items={topUnidades} />
+                </ExportableBlock>
+                <ExportableBlock
+                  title="top_subelementos_anual"
+                  targetRef={overviewTopSubExportRef}
+                  sheets={exportBundles.overviewTopSub}
+                  onExport={handleExportBlock}
+                  busy={exportingKey === "pdf:top_subelementos_anual" || exportingKey === "jpg:top_subelementos_anual" || exportingKey === "xlsx:top_subelementos_anual"}
+                >
+                  <TopRankingPanel title={`10 Subelementos com Maior Valor ${currentMetricLabel}`} items={topSubelementos} />
+                </ExportableBlock>
+              </section>
+            </ExportableBlock>
+            <ExportableBlock
+              title="visao-anual_bloco_destaques"
+              targetRef={overviewInsightsSectionExportRef}
+              sheets={[...exportBundles.overviewSummary, ...exportBundles.overviewHighlights]}
+              onExport={handleExportBlock}
+              busy={exportingKey === "pdf:visao-anual_bloco_destaques" || exportingKey === "jpg:visao-anual_bloco_destaques" || exportingKey === "xlsx:visao-anual_bloco_destaques"}
+              buttonLabel="Baixar bloco"
+              variant="section"
+            >
+              <section className="bi-grid">
+                <ExportableBlock
+                  title="comparativo_anual"
+                  targetRef={overviewSummaryExportRef}
+                  sheets={exportBundles.overviewSummary}
+                  onExport={handleExportBlock}
+                  busy={exportingKey === "pdf:comparativo_anual" || exportingKey === "jpg:comparativo_anual" || exportingKey === "xlsx:comparativo_anual"}
+                >
+                  <MonthlySummaryPanel
+                    title="Comparativo do Período Selecionado"
+                    firstLabel={annualRangeSummary?.firstLabel}
+                    lastLabel={annualRangeSummary?.lastLabel}
+                    firstValue={annualRangeSummary?.firstValue}
+                    lastValue={annualRangeSummary?.lastValue}
+                    metricLabel={currentMetricLabel}
+                  />
+                </ExportableBlock>
+                <ExportableBlock
+                  title="destaques_anuais"
+                  targetRef={overviewInsightsExportRef}
+                  sheets={exportBundles.overviewHighlights}
+                  onExport={handleExportBlock}
+                  busy={exportingKey === "pdf:destaques_anuais" || exportingKey === "jpg:destaques_anuais" || exportingKey === "xlsx:destaques_anuais"}
+                >
+                  <InsightCards cards={annualHighlights} />
+                </ExportableBlock>
+              </section>
+            </ExportableBlock>
           </>
         )}
 
         {activeTab === "monthly" && (
           <>
-            <section className="bi-grid bi-grid-main">
-              <PeriodBars items={monthlyVariationRows} metricLabel={currentMetricLabel} title="Série mensal" valueKey="period" />
-                <VariationTable
-                  rows={monthlyVariationRows}
-                  title="Variação mensal"
-                  periodLabel="Mês"
-                  valueKey="period"
-                  showIPCA
-                  ipcaAnnual={ipcaAnnual}
-                  ipcaMonthly={ipcaMonthly}
-                />
-            </section>
-            <section className="bi-grid">
-              <MonthlySummaryPanel
-                title="Comparativo do Período Selecionado"
-                firstPeriod={monthlyRangeSummary.firstPeriod}
-                lastPeriod={monthlyRangeSummary.lastPeriod}
-                metricLabel={currentMetricLabel}
-              />
-              <InsightCards title="Informações de Destaque" cards={monthlyHighlightsMaxMonth} />
-            </section>
-            <section className="bi-grid bi-grid-single">
-              <InsightCards title="Maior Variação" cards={monthlyHighlightsMaxVariation} />
-            </section>
+            <ExportableBlock
+              title="visao-mensal_bloco_principal"
+              targetRef={monthlyMainSectionExportRef}
+              sheets={[...exportBundles.monthlySeries, ...exportBundles.monthlyVariation]}
+              onExport={handleExportBlock}
+              busy={exportingKey === "pdf:visao-mensal_bloco_principal" || exportingKey === "jpg:visao-mensal_bloco_principal" || exportingKey === "xlsx:visao-mensal_bloco_principal"}
+              buttonLabel="Baixar bloco"
+              variant="section"
+            >
+              <section className="bi-grid bi-grid-main">
+                <ExportableBlock
+                  title="serie_mensal"
+                  targetRef={monthlySeriesExportRef}
+                  sheets={exportBundles.monthlySeries}
+                  onExport={handleExportBlock}
+                  busy={exportingKey === "pdf:serie_mensal" || exportingKey === "jpg:serie_mensal" || exportingKey === "xlsx:serie_mensal"}
+                >
+                  <PeriodBars items={monthlyVariationRows} metricLabel={currentMetricLabel} title="Série mensal" valueKey="period" />
+                </ExportableBlock>
+                <ExportableBlock
+                  title="variacao_mensal"
+                  targetRef={monthlyVariationExportRef}
+                  sheets={exportBundles.monthlyVariation}
+                  onExport={handleExportBlock}
+                  busy={exportingKey === "pdf:variacao_mensal" || exportingKey === "jpg:variacao_mensal" || exportingKey === "xlsx:variacao_mensal"}
+                >
+                  <VariationTable
+                    rows={monthlyVariationRows}
+                    title="Variação mensal"
+                    periodLabel="Mês"
+                    valueKey="period"
+                    showIPCA
+                    ipcaAnnual={ipcaAnnual}
+                    ipcaMonthly={ipcaMonthly}
+                  />
+                </ExportableBlock>
+              </section>
+            </ExportableBlock>
+            <ExportableBlock
+              title="visao-mensal_bloco_destaques"
+              targetRef={monthlySummarySectionExportRef}
+              sheets={[...exportBundles.monthlySummary, ...exportBundles.monthlyHighlightsMonth]}
+              onExport={handleExportBlock}
+              busy={exportingKey === "pdf:visao-mensal_bloco_destaques" || exportingKey === "jpg:visao-mensal_bloco_destaques" || exportingKey === "xlsx:visao-mensal_bloco_destaques"}
+              buttonLabel="Baixar bloco"
+              variant="section"
+            >
+              <section className="bi-grid">
+                <ExportableBlock
+                  title="comparativo_mensal"
+                  targetRef={monthlySummaryExportRef}
+                  sheets={exportBundles.monthlySummary}
+                  onExport={handleExportBlock}
+                  busy={exportingKey === "pdf:comparativo_mensal" || exportingKey === "jpg:comparativo_mensal" || exportingKey === "xlsx:comparativo_mensal"}
+                >
+                  <MonthlySummaryPanel
+                    title="Comparativo do Período Selecionado"
+                    firstPeriod={monthlyRangeSummary.firstPeriod}
+                    lastPeriod={monthlyRangeSummary.lastPeriod}
+                    metricLabel={currentMetricLabel}
+                  />
+                </ExportableBlock>
+                <ExportableBlock
+                  title="destaques_mensais"
+                  targetRef={monthlyHighlightsMonthExportRef}
+                  sheets={exportBundles.monthlyHighlightsMonth}
+                  onExport={handleExportBlock}
+                  busy={exportingKey === "pdf:destaques_mensais" || exportingKey === "jpg:destaques_mensais" || exportingKey === "xlsx:destaques_mensais"}
+                >
+                  <InsightCards title="Informações de Destaque" cards={monthlyHighlightsMaxMonth} />
+                </ExportableBlock>
+              </section>
+            </ExportableBlock>
+            <ExportableBlock
+              title="visao-mensal_bloco_maior_variacao"
+              targetRef={monthlyVariationSectionExportRef}
+              sheets={exportBundles.monthlyHighlightsVariation}
+              onExport={handleExportBlock}
+              busy={exportingKey === "pdf:visao-mensal_bloco_maior_variacao" || exportingKey === "jpg:visao-mensal_bloco_maior_variacao" || exportingKey === "xlsx:visao-mensal_bloco_maior_variacao"}
+              buttonLabel="Baixar bloco"
+              variant="section"
+            >
+              <section className="bi-grid bi-grid-single">
+                <ExportableBlock
+                  title="maior_variacao_mensal"
+                  targetRef={monthlyHighlightsVariationExportRef}
+                  sheets={exportBundles.monthlyHighlightsVariation}
+                  onExport={handleExportBlock}
+                  busy={exportingKey === "pdf:maior_variacao_mensal" || exportingKey === "jpg:maior_variacao_mensal" || exportingKey === "xlsx:maior_variacao_mensal"}
+                >
+                  <InsightCards title="Maior Variação" cards={monthlyHighlightsMaxVariation} />
+                </ExportableBlock>
+              </section>
+            </ExportableBlock>
           </>
         )}
 
         {activeTab === "distribution" && (
           <>
-            <section ref={distributionSectionRef} className="bi-grid">
-              <PiePanel
-                title={`${currentMetricNoun} por Subelemento`}
-                items={topSubelementos}
-                panelKey="subelemento"
-                hoveredState={distributionHover}
-                onHoverChange={setDistributionHover}
-                relationInfo={
-                  distributionHover
-                    ? distributionHover.source === "subelemento"
-                      ? distributionRelations.bySubelemento.get(distributionHover.label)
-                      : distributionRelations.byUnidade.get(distributionHover.label)
-                    : null
-                }
-                relationTargetLabel={
-                  distributionHover?.source === "unidade" ? "Subelementos relacionados" : "UGs relacionadas"
-                }
-              />
-              <PiePanel
-                title={`${currentMetricNoun} por Unidade Gestora`}
-                items={topUnidades}
-                panelKey="unidade"
-                hoveredState={distributionHover}
-                onHoverChange={setDistributionHover}
-                relationInfo={
-                  distributionHover
-                    ? distributionHover.source === "unidade"
-                      ? distributionRelations.byUnidade.get(distributionHover.label)
-                      : distributionRelations.bySubelemento.get(distributionHover.label)
-                    : null
-                }
-                relationTargetLabel={
-                  distributionHover?.source === "subelemento" ? "UGs relacionadas" : "Subelementos relacionados"
-                }
-              />
-            </section>
-            <section className="bi-grid bi-grid-single">
-              <DistributionRelationshipCard
-                hoveredState={distributionHover}
-                relationInfo={distributionSelectionDetails.relationInfo}
-                relationTargetLabel={distributionSelectionDetails.relationTargetLabel}
-                othersItems={distributionSelectionDetails.othersItems}
-                onClear={() => setDistributionHover(null)}
-              />
-            </section>
+            <ExportableBlock
+              title="distribuicao_bloco_principal"
+              targetRef={distributionGridExportRef}
+              sheets={[...exportBundles.distributionSub, ...exportBundles.distributionUg]}
+              onExport={handleExportBlock}
+              busy={exportingKey === "pdf:distribuicao_bloco_principal" || exportingKey === "jpg:distribuicao_bloco_principal" || exportingKey === "xlsx:distribuicao_bloco_principal"}
+              buttonLabel="Baixar bloco"
+              variant="section"
+            >
+              <section ref={distributionSectionRef} className="bi-grid">
+                <ExportableBlock
+                  title="distribuicao_subelemento"
+                  targetRef={distributionSubExportRef}
+                  sheets={exportBundles.distributionSub}
+                  onExport={handleExportBlock}
+                  busy={exportingKey === "pdf:distribuicao_subelemento" || exportingKey === "jpg:distribuicao_subelemento" || exportingKey === "xlsx:distribuicao_subelemento"}
+                >
+                  <PiePanel
+                    title={`${currentMetricNoun} por Subelemento`}
+                    items={topSubelementos}
+                    panelKey="subelemento"
+                    hoveredState={distributionHover}
+                    onHoverChange={setDistributionHover}
+                    relationInfo={
+                      distributionHover
+                        ? distributionHover.source === "subelemento"
+                          ? distributionRelations.bySubelemento.get(distributionHover.label)
+                          : distributionRelations.byUnidade.get(distributionHover.label)
+                        : null
+                    }
+                    relationTargetLabel={
+                      distributionHover?.source === "unidade" ? "Subelementos relacionados" : "UGs relacionadas"
+                    }
+                  />
+                </ExportableBlock>
+                <ExportableBlock
+                  title="distribuicao_ug"
+                  targetRef={distributionUgExportRef}
+                  sheets={exportBundles.distributionUg}
+                  onExport={handleExportBlock}
+                  busy={exportingKey === "pdf:distribuicao_ug" || exportingKey === "jpg:distribuicao_ug" || exportingKey === "xlsx:distribuicao_ug"}
+                >
+                  <PiePanel
+                    title={`${currentMetricNoun} por Unidade Gestora`}
+                    items={topUnidades}
+                    panelKey="unidade"
+                    hoveredState={distributionHover}
+                    onHoverChange={setDistributionHover}
+                    relationInfo={
+                      distributionHover
+                        ? distributionHover.source === "unidade"
+                          ? distributionRelations.byUnidade.get(distributionHover.label)
+                          : distributionRelations.bySubelemento.get(distributionHover.label)
+                        : null
+                    }
+                    relationTargetLabel={
+                      distributionHover?.source === "subelemento" ? "UGs relacionadas" : "Subelementos relacionados"
+                    }
+                  />
+                </ExportableBlock>
+              </section>
+            </ExportableBlock>
+            <ExportableBlock
+              title="distribuicao_bloco_relacoes"
+              targetRef={distributionRelationsExportRef}
+              sheets={exportBundles.distributionRelations}
+              onExport={handleExportBlock}
+              busy={exportingKey === "pdf:distribuicao_bloco_relacoes" || exportingKey === "jpg:distribuicao_bloco_relacoes" || exportingKey === "xlsx:distribuicao_bloco_relacoes"}
+              buttonLabel="Baixar bloco"
+              variant="section"
+            >
+              <section className="bi-grid bi-grid-single">
+                <ExportableBlock
+                  title="relacionamentos_distribuicao"
+                  targetRef={distributionRelationCardExportRef}
+                  sheets={exportBundles.distributionRelations}
+                  onExport={handleExportBlock}
+                  busy={exportingKey === "pdf:relacionamentos_distribuicao" || exportingKey === "jpg:relacionamentos_distribuicao" || exportingKey === "xlsx:relacionamentos_distribuicao"}
+                >
+                  <DistributionRelationshipCard
+                    hoveredState={distributionHover}
+                    relationInfo={distributionSelectionDetails.relationInfo}
+                    relationTargetLabel={distributionSelectionDetails.relationTargetLabel}
+                    othersItems={distributionSelectionDetails.othersItems}
+                    onClear={() => setDistributionHover(null)}
+                  />
+                </ExportableBlock>
+              </section>
+            </ExportableBlock>
           </>
         )}
 
         {activeTab === "trends" && (
-          <section ref={rankingSectionRef} className="bi-grid">
-            <BarList
-              title={`Subelementos com Maior ${currentMetricNoun}`}
-              items={rankingSubelementos}
-              onClickItem={setSelectedSubelementInRanking}
-              selectedItem={selectedSubelementInRanking}
-              relatedLabels={rankingSubelementoRelatedLabels}
-              referenceTotal={rankingSubelementosReferenceTotal}
-              limitHeight
-            />
-            <BarList
-              title={`Unidades Gestoras com Maior ${currentMetricNoun}`}
-              items={rankingUnidades}
-              onClickItem={setSelectedUgInRanking}
-              selectedItem={selectedUgInRanking}
-              relatedLabels={rankingUgRelatedLabels}
-              referenceTotal={rankingUnidadesReferenceTotal}
-              limitHeight
-            />
-          </section>
+          <ExportableBlock
+            title="ranking_bloco_principal"
+            targetRef={trendsSectionExportRef}
+            sheets={[...exportBundles.trendsSub, ...exportBundles.trendsUg]}
+            onExport={handleExportBlock}
+            busy={exportingKey === "pdf:ranking_bloco_principal" || exportingKey === "jpg:ranking_bloco_principal" || exportingKey === "xlsx:ranking_bloco_principal"}
+            buttonLabel="Baixar bloco"
+            variant="section"
+          >
+            <section ref={rankingSectionRef} className="bi-grid">
+              <ExportableBlock
+                title="ranking_subelementos"
+                targetRef={trendsSubExportRef}
+                sheets={exportBundles.trendsSub}
+                onExport={handleExportBlock}
+                busy={exportingKey === "pdf:ranking_subelementos" || exportingKey === "jpg:ranking_subelementos" || exportingKey === "xlsx:ranking_subelementos"}
+              >
+                <BarList
+                  title={`Subelementos com Maior ${currentMetricNoun}`}
+                  items={rankingSubelementos}
+                  onClickItem={setSelectedSubelementInRanking}
+                  selectedItem={selectedSubelementInRanking}
+                  relatedLabels={rankingSubelementoRelatedLabels}
+                  referenceTotal={rankingSubelementosReferenceTotal}
+                  limitHeight
+                />
+              </ExportableBlock>
+              <ExportableBlock
+                title="ranking_ugs"
+                targetRef={trendsUgExportRef}
+                sheets={exportBundles.trendsUg}
+                onExport={handleExportBlock}
+                busy={exportingKey === "pdf:ranking_ugs" || exportingKey === "jpg:ranking_ugs" || exportingKey === "xlsx:ranking_ugs"}
+              >
+                <BarList
+                  title={`Unidades Gestoras com Maior ${currentMetricNoun}`}
+                  items={rankingUnidades}
+                  onClickItem={setSelectedUgInRanking}
+                  selectedItem={selectedUgInRanking}
+                  relatedLabels={rankingUgRelatedLabels}
+                  referenceTotal={rankingUnidadesReferenceTotal}
+                  limitHeight
+                />
+              </ExportableBlock>
+            </section>
+          </ExportableBlock>
         )}
 
         {activeTab === "matrix" && (
-          <section className="bi-grid bi-grid-single">
-            <MatrixPanelView
-              title="Valores por Subelemento e Ano"
-              rows={matrixBySubelemento}
-              years={years}
-              matrixSearch={matrixSearch}
-              onMatrixSearch={setMatrixSearch}
-              fmtCompact={fmtCompact}
-              fmtCurrency={fmtCurrency}
-            />
-            <MatrixPanelView
-              title="Valores por Unidade Gestora e Ano"
-              rows={matrixByUnidade}
-              years={years}
-              matrixSearch={matrixSearch}
-              onMatrixSearch={setMatrixSearch}
-              fmtCompact={fmtCompact}
-              fmtCurrency={fmtCurrency}
-            />
-          </section>
+          <ExportableBlock
+            title="matriz_bloco_principal"
+            targetRef={matrixSectionExportRef}
+            sheets={[...exportBundles.matrixSub, ...exportBundles.matrixUg]}
+            onExport={handleExportBlock}
+            busy={exportingKey === "pdf:matriz_bloco_principal" || exportingKey === "jpg:matriz_bloco_principal" || exportingKey === "xlsx:matriz_bloco_principal"}
+            buttonLabel="Baixar bloco"
+            variant="section"
+          >
+            <section className="bi-grid bi-grid-single">
+              <ExportableBlock
+                title="matriz_subelementos"
+                targetRef={matrixSubExportRef}
+                sheets={exportBundles.matrixSub}
+                onExport={handleExportBlock}
+                busy={exportingKey === "pdf:matriz_subelementos" || exportingKey === "jpg:matriz_subelementos" || exportingKey === "xlsx:matriz_subelementos"}
+              >
+                <MatrixPanelView
+                  title="Valores por Subelemento e Ano"
+                  rows={matrixBySubelemento}
+                  years={years}
+                  matrixSearch={matrixSearch}
+                  onMatrixSearch={setMatrixSearch}
+                  fmtCompact={fmtCompact}
+                  fmtCurrency={fmtCurrency}
+                />
+              </ExportableBlock>
+              <ExportableBlock
+                title="matriz_ugs"
+                targetRef={matrixUgExportRef}
+                sheets={exportBundles.matrixUg}
+                onExport={handleExportBlock}
+                busy={exportingKey === "pdf:matriz_ugs" || exportingKey === "jpg:matriz_ugs" || exportingKey === "xlsx:matriz_ugs"}
+              >
+                <MatrixPanelView
+                  title="Valores por Unidade Gestora e Ano"
+                  rows={matrixByUnidade}
+                  years={years}
+                  matrixSearch={matrixSearch}
+                  onMatrixSearch={setMatrixSearch}
+                  fmtCompact={fmtCompact}
+                  fmtCurrency={fmtCurrency}
+                />
+              </ExportableBlock>
+            </section>
+          </ExportableBlock>
         )}
 
         {activeTab === "ugRanking" && (
+          <ExportableBlock
+            title="evolucao_bloco_principal"
+            targetRef={evolutionSectionExportRef}
+            sheets={exportBundles.evolution}
+            onExport={handleExportBlock}
+            busy={exportingKey === "pdf:evolucao_bloco_principal" || exportingKey === "jpg:evolucao_bloco_principal" || exportingKey === "xlsx:evolucao_bloco_principal"}
+            buttonLabel="Baixar bloco"
+            variant="section"
+          >
           <>
             <div className="bi-tab-header">
               <div className="bi-filter-group">
@@ -2695,95 +3950,206 @@ export default function CusteioDashboard() {
                   </button>
                 </div>
               </div>
+              <div className="bi-filter-group">
+                <label>Recorte da Evolução</label>
+                <div className="bi-toggle-group">
+                  <button
+                    type="button"
+                    className={evolutionView === "ug" ? "is-active" : ""}
+                    onClick={() => setEvolutionView("ug")}
+                  >
+                    Top 10 UGs
+                  </button>
+                  <button
+                    type="button"
+                    className={evolutionView === "subelemento" ? "is-active" : ""}
+                    onClick={() => setEvolutionView("subelemento")}
+                  >
+                    Top 10 Subelementos
+                  </button>
+                </div>
+              </div>
             </div>
 
             <section className="bi-grid bi-grid-single">
-              <TopUgTrendLinesPanel
-                title={`Evolução ${evolutionType === "monthly" ? "Mensal" : "Anual"} (Top 10 UGs)`}
-                periods={topUgTrendSeries.periods}
-                series={topUgTrendSeries.series}
-                metricLabel={currentMetricLabel}
-                large
-                selectedPeriodKey={selectedRankingPeriod}
-                onSelectPeriod={setSelectedRankingPeriod}
-                selectedSeriesLabel={selectedEvolutionUg}
-                onSelectSeries={setSelectedEvolutionUg}
-              />
+              {evolutionView === "ug" ? (
+                <ExportableBlock
+                  title="evolucao_top_ugs"
+                  targetRef={evolutionPanelExportRef}
+                  sheets={exportBundles.evolution}
+                  onExport={handleExportBlock}
+                  busy={exportingKey === "pdf:evolucao_top_ugs" || exportingKey === "jpg:evolucao_top_ugs" || exportingKey === "xlsx:evolucao_top_ugs"}
+                >
+                  <TopUgTrendLinesPanel
+                    title={`Evolução ${evolutionType === "monthly" ? "Mensal" : "Anual"} (Top 10 UGs)`}
+                    periods={topUgTrendSeries.periods}
+                    series={topUgTrendSeries.series}
+                    metricLabel={currentMetricLabel}
+                    large
+                    selectedPeriodKey={selectedRankingPeriod}
+                    onSelectPeriod={setSelectedRankingPeriod}
+                    selectedSeriesLabel={selectedEvolutionUg}
+                    onSelectSeries={setSelectedEvolutionUg}
+                    dominantLabel="UG dominante"
+                    monitoredLabel="UGs monitoradas"
+                    detailLabel="subelementos"
+                    emptyDetailMessage="Sem subelementos para o recorte selecionado."
+                  />
+                </ExportableBlock>
+              ) : (
+                <ExportableBlock
+                  title="evolucao_top_subelementos"
+                  targetRef={evolutionSubPanelExportRef}
+                  sheets={exportBundles.evolution}
+                  onExport={handleExportBlock}
+                  busy={exportingKey === "pdf:evolucao_top_subelementos" || exportingKey === "jpg:evolucao_top_subelementos" || exportingKey === "xlsx:evolucao_top_subelementos"}
+                >
+                  <TopUgTrendLinesPanel
+                    title={`Evolução ${evolutionType === "monthly" ? "Mensal" : "Anual"} (Top 10 Subelementos)`}
+                    periods={topSubelementTrendSeries.periods}
+                    series={topSubelementTrendSeries.series}
+                    metricLabel={currentMetricLabel}
+                    large
+                    selectedPeriodKey={selectedRankingPeriod}
+                    onSelectPeriod={setSelectedRankingPeriod}
+                    selectedSeriesLabel={selectedEvolutionSubelement}
+                    onSelectSeries={setSelectedEvolutionSubelement}
+                    dominantLabel="Subelemento dominante"
+                    monitoredLabel="Subelementos monitorados"
+                    detailLabel="UGs"
+                    emptyDetailMessage="Sem UGs para o recorte selecionado."
+                  />
+                </ExportableBlock>
+              )}
             </section>
           </>
+          </ExportableBlock>
         )}
 
         {activeTab === "alerts" && (
           <>
-            <section className="bi-grid">
-              <section className="bi-panel">
-                <div className="bi-panel-header">
-                  <h3>Monitoramento Contínuo</h3>
-                  <span>Leitura incremental sobre a base oficial</span>
-                </div>
+            <ExportableBlock
+              title="alertas_bloco_superior"
+              targetRef={alertsTopSectionExportRef}
+              sheets={[...exportBundles.alertsConfig, ...exportBundles.alertsInsights]}
+              onExport={handleExportBlock}
+              busy={exportingKey === "pdf:alertas_bloco_superior" || exportingKey === "jpg:alertas_bloco_superior" || exportingKey === "xlsx:alertas_bloco_superior"}
+              buttonLabel="Baixar bloco"
+              variant="section"
+            >
+              <section className="bi-grid">
+                <ExportableBlock
+                  title="alertas_configuracao"
+                  targetRef={alertsConfigExportRef}
+                  sheets={exportBundles.alertsConfig}
+                  onExport={handleExportBlock}
+                  busy={exportingKey === "pdf:alertas_configuracao" || exportingKey === "jpg:alertas_configuracao" || exportingKey === "xlsx:alertas_configuracao"}
+                >
+                  <section className="bi-panel">
+                    <div className="bi-panel-header">
+                      <h3>Monitoramento Contínuo</h3>
+                      <span>Leitura incremental sobre a base oficial</span>
+                    </div>
 
-                <div className="bi-alert-controls">
-                  <div className="bi-filter-group">
-                    <label htmlFor="alert-grouping">Agrupamento da Leitura</label>
-                    <select id="alert-grouping" value={alertGrouping} onChange={(e) => setAlertGrouping(e.target.value)}>
-                      <option value="subelemento">Subelemento</option>
-                      <option value="unidade">Unidade Gestora</option>
-                      <option value="elemento">Elemento</option>
-                    </select>
-                  </div>
+                    <div className="bi-alert-controls">
+                      <div className="bi-filter-group">
+                        <label htmlFor="alert-grouping">Agrupamento da Leitura</label>
+                        <select id="alert-grouping" value={alertGrouping} onChange={(e) => setAlertGrouping(e.target.value)}>
+                          <option value="subelemento">Subelemento</option>
+                          <option value="unidade">Unidade Gestora</option>
+                          <option value="elemento">Elemento</option>
+                        </select>
+                      </div>
 
-                  <div className="bi-filter-group">
-                    <label htmlFor="alert-threshold">Limite de Alerta (%)</label>
-                    <input
-                      id="alert-threshold"
-                      type="number"
-                      min="0"
-                      step="1"
-                      className="bi-search-input"
-                      value={alertThreshold}
-                      onChange={(e) => setAlertThreshold(Math.max(0, Number(e.target.value) || 0))}
-                    />
-                  </div>
-                </div>
+                      <div className="bi-filter-group">
+                        <label htmlFor="alert-threshold">Limite de Alerta (%)</label>
+                        <input
+                          id="alert-threshold"
+                          type="number"
+                          min="0"
+                          step="1"
+                          className="bi-search-input"
+                          value={alertThreshold}
+                          onChange={(e) => setAlertThreshold(Math.max(0, Number(e.target.value) || 0))}
+                        />
+                      </div>
+                    </div>
 
-                <div className="bi-narrative">
-                  <p>
-                    Esta trilha compara o primeiro e o último período do recorte atual e também verifica se o último
-                    período ficou acima da média dos 12 meses anteriores.
-                  </p>
-                  <p>
-                    Sugestão de leitura: 10% para alertas mensais e 50% para leituras anuais. O ajuste aqui afeta somente
-                    esta aba.
-                  </p>
-                </div>
+                    <div className="bi-narrative">
+                      <p>
+                        Esta trilha compara o primeiro e o último período do recorte atual e também verifica se o último
+                        período ficou acima da média dos 12 meses anteriores.
+                      </p>
+                      <p>
+                        Sugestão de leitura: 10% para alertas mensais e 50% para leituras anuais. O ajuste aqui afeta somente
+                        esta aba.
+                      </p>
+                    </div>
+                  </section>
+                </ExportableBlock>
+
+                <ExportableBlock
+                  title="alertas_destaques"
+                  targetRef={alertsInsightsExportRef}
+                  sheets={exportBundles.alertsInsights}
+                  onExport={handleExportBlock}
+                  busy={exportingKey === "pdf:alertas_destaques" || exportingKey === "jpg:alertas_destaques" || exportingKey === "xlsx:alertas_destaques"}
+                >
+                  <InsightCards cards={alertInsightCards} />
+                </ExportableBlock>
               </section>
+            </ExportableBlock>
 
-              <InsightCards cards={alertInsightCards} />
-            </section>
-
-            <section className="bi-grid bi-grid-single">
-              <AlertTable
-                title="Variações Acima do Limite entre o Início e o Fim do Recorte"
-                rows={periodComparisonRows.slice(0, 12)}
-                baseLabel={effectiveAlertStartPeriod || "Início"}
-                compareLabel={effectiveAlertEndPeriod || "Fim"}
-                emptyMessage="Selecione um intervalo com ao menos dois períodos para montar os alertas de comparação."
-                totalValue={periodEndTotal}
-              />
-              <AlertTable
-                title="Desvios Acima da Média Histórica"
-                rows={historicalAlertRows.slice(0, 12)}
-                baseLabel="Média 12 Meses"
-                compareLabel={effectiveAlertEndPeriod || "Período Final"}
-                emptyMessage="Ainda não há histórico suficiente para comparar o último período com a média anterior."
-                totalValue={periodEndTotal}
-              />
-            </section>
+            <ExportableBlock
+              title="alertas_bloco_tabelas"
+              targetRef={alertsTablesSectionExportRef}
+              sheets={[...exportBundles.alertsPeriod, ...exportBundles.alertsHistorical]}
+              onExport={handleExportBlock}
+              busy={exportingKey === "pdf:alertas_bloco_tabelas" || exportingKey === "jpg:alertas_bloco_tabelas" || exportingKey === "xlsx:alertas_bloco_tabelas"}
+              buttonLabel="Baixar bloco"
+              variant="section"
+            >
+              <section className="bi-grid bi-grid-single">
+                <ExportableBlock
+                  title="alertas_periodo"
+                  targetRef={alertsPeriodExportRef}
+                  sheets={exportBundles.alertsPeriod}
+                  onExport={handleExportBlock}
+                  busy={exportingKey === "pdf:alertas_periodo" || exportingKey === "jpg:alertas_periodo" || exportingKey === "xlsx:alertas_periodo"}
+                >
+                  <AlertTable
+                    title="Variações Acima do Limite entre o Início e o Fim do Recorte"
+                    rows={periodComparisonRows.slice(0, 12)}
+                    baseLabel={effectiveAlertStartPeriod || "Início"}
+                    compareLabel={effectiveAlertEndPeriod || "Fim"}
+                    emptyMessage="Selecione um intervalo com ao menos dois períodos para montar os alertas de comparação."
+                    totalValue={periodEndTotal}
+                  />
+                </ExportableBlock>
+                <ExportableBlock
+                  title="alertas_historicos"
+                  targetRef={alertsHistoricalExportRef}
+                  sheets={exportBundles.alertsHistorical}
+                  onExport={handleExportBlock}
+                  busy={exportingKey === "pdf:alertas_historicos" || exportingKey === "jpg:alertas_historicos" || exportingKey === "xlsx:alertas_historicos"}
+                >
+                  <AlertTable
+                    title="Desvios Acima da Média Histórica"
+                    rows={historicalAlertRows.slice(0, 12)}
+                    baseLabel="Média 12 Meses"
+                    compareLabel={effectiveAlertEndPeriod || "Período Final"}
+                    emptyMessage="Ainda não há histórico suficiente para comparar o último período com a média anterior."
+                    totalValue={periodEndTotal}
+                  />
+                </ExportableBlock>
+              </section>
+            </ExportableBlock>
           </>
         )}
       </div>
     </div>
   );
 }
+
 
 

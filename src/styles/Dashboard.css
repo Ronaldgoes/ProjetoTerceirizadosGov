@@ -3623,6 +3623,126 @@ aside {
   gap: 10px;
 }
 
+.bi-export-scope {
+  position: relative;
+}
+
+.bi-export-scope--section {
+  min-width: 0;
+}
+
+.bi-export-frame {
+  position: relative;
+  min-width: 0;
+}
+
+.bi-export-toolbar {
+  display: flex;
+  justify-content: flex-end;
+  pointer-events: auto;
+}
+
+.bi-export-scope--panel {
+  min-width: 0;
+}
+
+.bi-export-scope--panel .bi-export-frame > .bi-panel,
+.bi-export-scope--panel .bi-export-frame > .bi-matrix-panel {
+  padding-bottom: 78px;
+}
+
+.bi-export-menu {
+  position: relative;
+}
+
+.bi-export-scope--panel .bi-export-toolbar {
+  position: absolute;
+  right: 20px;
+  bottom: 20px;
+  margin-top: 0;
+  z-index: 5;
+}
+
+.bi-export-trigger {
+  min-width: 118px;
+  height: 36px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  border-radius: 10px;
+  border: 1px solid rgba(200, 208, 224, 0.28);
+  background: rgba(10, 18, 36, 0.88);
+  color: #E8EEF9;
+  padding: 0 12px;
+  font-size: 0.82rem;
+  font-weight: 600;
+  cursor: pointer;
+  box-shadow: 0 8px 18px rgba(4, 10, 22, 0.18);
+  transition: transform 0.18s ease, box-shadow 0.18s ease, border-color 0.18s ease, background 0.18s ease;
+}
+
+.bi-export-trigger:hover {
+  transform: translateY(-1px);
+  border-color: rgba(223, 230, 243, 0.45);
+  background: rgba(13, 24, 47, 0.96);
+  box-shadow: 0 12px 22px rgba(6, 12, 26, 0.24);
+}
+
+.bi-export-trigger:disabled {
+  cursor: wait;
+  opacity: 0.72;
+  transform: none;
+}
+
+.bi-export-trigger svg {
+  width: 15px;
+  height: 15px;
+}
+
+.bi-export-trigger-text {
+  line-height: 1;
+}
+
+.bi-export-trigger-label {
+  line-height: 1;
+}
+
+.bi-export-options {
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  min-width: 144px;
+  padding: 8px;
+  border-radius: 12px;
+  border: 1px solid rgba(205, 213, 225, 0.7);
+  background: rgba(255, 255, 255, 0.98);
+  box-shadow: 0 18px 40px rgba(15, 23, 42, 0.28);
+  display: grid;
+  gap: 6px;
+  z-index: 8;
+}
+
+.bi-export-options button {
+  width: 100%;
+  border: 1px solid transparent;
+  background: transparent;
+  color: #334155;
+  border-radius: 8px;
+  padding: 9px 12px;
+  text-align: left;
+  font-size: 0.83rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.16s ease, border-color 0.16s ease, transform 0.16s ease;
+}
+
+.bi-export-options button:hover {
+  background: rgba(86, 117, 183, 0.12);
+  border-color: rgba(86, 117, 183, 0.16);
+  color: #1E3A8A;
+}
+
 @media (max-width: 768px) {
   .bi-dashboard {
     padding-top: 140px;
