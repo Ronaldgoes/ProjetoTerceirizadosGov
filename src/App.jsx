@@ -1,4 +1,5 @@
 import AppRouter from "./app/AppRouter";
+import AppErrorBoundary from "./components/AppErrorBoundary";
 import { AuthProvider } from "./contexts/AuthContext";
 import { useAuth } from "./hooks/useAuth";
 import { useAlertsRunner } from "./hooks/useAlerts";
@@ -20,7 +21,9 @@ function AppShell() {
 export default function App() {
   return (
     <AuthProvider>
-      <AppShell />
+      <AppErrorBoundary>
+        <AppShell />
+      </AppErrorBoundary>
     </AuthProvider>
   );
 }

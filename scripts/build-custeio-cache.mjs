@@ -2,6 +2,24 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { fetchIpcaSeries } from "../src/utils/ipcaSeries.js";
+import {
+  buildAggregatedDataset,
+  buildContractsExportUrl,
+  buildDetailedFactsFromContracts,
+  buildDetailedFactsFromSicopDetail,
+  buildDespesaExportUrl,
+  buildExtratoSicopUrl,
+  buildProcurementModeOptions,
+  comparePeriod,
+  currentBrazilPeriod,
+  decodeCsv,
+  getContractReferencePeriod,
+  parseContractsCsv,
+  parseDespesaCsvToRecords,
+  periodEndDate,
+  shiftPeriod,
+  shouldFetchSicopDetail,
+} from "../src/utils/custeioOfficialPortal.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(__dirname, "..");
@@ -9,7 +27,6 @@ const outDir = path.join(root, "public", "data");
 const outFile = path.join(outDir, "custeio-oficial.json");
 
 const official = {
-  apiUrl: "https://api-portal-transparencia.apps.sm.okd4.ciasc.sc.gov.br/api",
   monthsByYear: {
     2021: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
     2022: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
@@ -18,162 +35,11 @@ const official = {
     2025: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
     2026: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
   },
-  agrupamentos: ["ano", "mes", "elemento", "subelemento", "unidadegestora"],
-  subelementoPrefix: "33",
-  indicador: 0,
+  currentPeriod: currentBrazilPeriod(),
+  contractsHistoryMonths: 18,
+  contractsLookbackMonths: 12,
+  detailConcurrency: 6,
 };
-
-function periodKey(year, month) {
-  return `${year}${String(month).padStart(2, "0")}`;
-}
-
-function buildExportUrl(year, month) {
-  const url = new URL(`${official.apiUrl}/despesa/exportcsv`);
-  const value = periodKey(year, month);
-
-  url.searchParams.append("anomesinifiltro[]", value);
-  url.searchParams.append("anomesfimfiltro[]", value);
-
-  official.agrupamentos.forEach((group) => {
-    url.searchParams.append("agrupamentos[]", group);
-  });
-
-  url.searchParams.set("indicador", String(official.indicador));
-  return url.toString();
-}
-
-function parseBrazilianNumber(value) {
-  const normalized = String(value || "0")
-    .replace(/\./g, "")
-    .replace(",", ".")
-    .replace(/[^\d.-]/g, "");
-  const parsed = Number(normalized);
-  return Number.isFinite(parsed) ? parsed : 0;
-}
-
-function normalizeHeader(value) {
-  return String(value || "")
-    .normalize("NFD")
-    .replace(/\p{Diacritic}/gu, "")
-    .toLowerCase()
-    .trim();
-}
-
-function splitCsvLine(line) {
-  if (typeof line !== "string") return [];
-
-  const result = [];
-  let current = "";
-  let inQuotes = false;
-
-  for (let i = 0; i < line.length; i += 1) {
-    const char = line[i];
-    const next = line[i + 1];
-
-    if (char === '"') {
-      if (inQuotes && next === '"') {
-        current += '"';
-        i += 1;
-      } else {
-        inQuotes = !inQuotes;
-      }
-      continue;
-    }
-
-    if (char === ";" && !inQuotes) {
-      result.push(current);
-      current = "";
-      continue;
-    }
-
-    current += char;
-  }
-
-  result.push(current);
-  return result.map((item) => item.trim());
-}
-
-function mapHeader(header) {
-  const index = {};
-  header.forEach((column, idx) => {
-    index[normalizeHeader(column)] = idx;
-  });
-  return index;
-}
-
-function getCell(row, idx, columnName) {
-  const position = idx[normalizeHeader(columnName)];
-  return position === undefined ? "" : row[position] || "";
-}
-
-function decodeCsv(buffer) {
-  const utf8 = buffer.toString("utf-8");
-  if (!utf8.includes("\uFFFD")) return utf8;
-  return buffer.toString("latin1");
-}
-
-function parseCsvToRecords(text, accumulator) {
-  const lines = text.split(/\r?\n/).filter(Boolean);
-  if (lines.length < 2) return;
-
-  const header = splitCsvLine(lines[0]);
-  const idx = mapHeader(header);
-
-  lines.slice(1).forEach((line) => {
-    const row = splitCsvLine(line);
-
-    const year = Number(getCell(row, idx, "nuano"));
-    const month = Number(getCell(row, idx, "numes"));
-    const monthLabel = getCell(row, idx, "nmmes").trim();
-    const elementoCode = getCell(row, idx, "cdelemento").trim();
-    const elementoName = getCell(row, idx, "nmelemento").trim();
-    const subelementoCode = getCell(row, idx, "cdsubelemento").trim();
-    const subelementoName = getCell(row, idx, "nmsubelemento").trim();
-    const unidadeCode = getCell(row, idx, "cdunidadegestora").trim() || "00000";
-    const unidadeName = getCell(row, idx, "nmunidadegestora").trim() || "Nao Informado";
-
-    if (!year || !month || !subelementoCode) return;
-    if (!subelementoCode.startsWith(official.subelementoPrefix)) return;
-
-    const recordKey = [
-      year,
-      String(month).padStart(2, "0"),
-      elementoCode,
-      elementoName,
-      subelementoCode,
-      subelementoName,
-      unidadeCode,
-      unidadeName,
-    ].join("|");
-
-    const current =
-      accumulator.get(recordKey) ||
-      {
-        year,
-        month,
-        monthLabel,
-        periodKey: `${year}-${String(month).padStart(2, "0")}`,
-        elementoCode,
-        elementoName,
-        elementoLabel: `${elementoCode} - ${elementoName}`.trim(),
-        subelementoCode,
-        subelementoName,
-        subelementoLabel: `${subelementoCode} - ${subelementoName}`.trim(),
-        unidadeGestoraCode: unidadeCode,
-        unidadeGestoraName: unidadeName,
-        unidadeGestoraLabel: `${unidadeCode} - ${unidadeName}`.trim(),
-        vlempenhado: 0,
-        vlliquidado: 0,
-        vlpago: 0,
-      };
-
-    current.vlempenhado += parseBrazilianNumber(getCell(row, idx, "vlempenhado"));
-    current.vlliquidado += parseBrazilianNumber(getCell(row, idx, "vlliquidado"));
-    current.vlpago += parseBrazilianNumber(getCell(row, idx, "vlpago"));
-
-    accumulator.set(recordKey, current);
-  });
-}
 
 async function fetchWithRetry(url, retries = 3) {
   for (let attempt = 0; attempt < retries; attempt += 1) {
@@ -192,6 +58,23 @@ async function fetchWithRetry(url, retries = 3) {
   return null;
 }
 
+async function mapWithConcurrency(items, concurrency, worker) {
+  const results = [];
+  let cursor = 0;
+
+  async function consume() {
+    while (cursor < items.length) {
+      const currentIndex = cursor;
+      cursor += 1;
+      results[currentIndex] = await worker(items[currentIndex], currentIndex);
+    }
+  }
+
+  const workers = Array.from({ length: Math.max(1, Math.min(concurrency, items.length || 1)) }, consume);
+  await Promise.all(workers);
+  return results;
+}
+
 const records = new Map();
 const requestedPeriods = [];
 const fetchedPeriods = [];
@@ -201,67 +84,88 @@ for (const [year, months] of Object.entries(official.monthsByYear)) {
   for (const month of months) {
     const monthPeriodKey = `${year}-${String(month).padStart(2, "0")}`;
     requestedPeriods.push(monthPeriodKey);
-    const url = buildExportUrl(year, month);
-    console.log(`Baixando ${url}`);
 
-    const response = await fetchWithRetry(url);
+    const response = await fetchWithRetry(buildDespesaExportUrl(year, month));
     if (!response) {
       missingPeriods.push(monthPeriodKey);
-      console.log(`Aviso: exportacao oficial nao encontrada para ${year}-${String(month).padStart(2, "0")}.`);
       continue;
     }
 
     const buffer = Buffer.from(await response.arrayBuffer());
-    const csvText = decodeCsv(buffer);
-    parseCsvToRecords(csvText, records);
+    parseDespesaCsvToRecords(decodeCsv(buffer), records);
     fetchedPeriods.push(monthPeriodKey);
+  }
+}
+
+const aggregated = buildAggregatedDataset(records);
+const latestPeriodAvailable =
+  aggregated.aggregatedRecords.at(-1)?.periodKey ||
+  [...aggregated.availableYears].sort((a, b) => a - b).at(-1)?.toString() ||
+  official.currentPeriod;
+
+const contractsStartDate = `${aggregated.availableYears[0] || new Date().getFullYear()}-01-01`;
+const contractsEndDate = periodEndDate(latestPeriodAvailable) || periodEndDate(official.currentPeriod);
+let contractRows = [];
+let dashboardContractRows = [];
+let detailedFacts = [];
+let procurementModeOptions = [];
+const contractDetailErrors = [];
+const fetchedContractDetails = [];
+const skippedContractDetails = [];
+
+if (contractsEndDate) {
+  console.log(`Baixando contratos oficiais entre ${contractsStartDate} e ${contractsEndDate}`);
+  const contractsResponse = await fetchWithRetry(buildContractsExportUrl(contractsStartDate, contractsEndDate));
+
+  if (contractsResponse) {
+    const buffer = Buffer.from(await contractsResponse.arrayBuffer());
+    contractRows = parseContractsCsv(decodeCsv(buffer));
+    procurementModeOptions = buildProcurementModeOptions(contractRows);
+    const dashboardThreshold = shiftPeriod(latestPeriodAvailable || official.currentPeriod, -official.contractsHistoryMonths);
+    dashboardContractRows = contractRows.filter((row) => {
+      const referencePeriod = getContractReferencePeriod(row);
+      return referencePeriod ? comparePeriod(referencePeriod, dashboardThreshold) >= 0 : false;
+    });
+    detailedFacts = buildDetailedFactsFromContracts(dashboardContractRows);
+
+    const rowsForDetail = dashboardContractRows.filter((row) => shouldFetchSicopDetail(row, latestPeriodAvailable, official.contractsLookbackMonths));
+    skippedContractDetails.push(...dashboardContractRows.filter((row) => !rowsForDetail.includes(row)).map((row) => row.contractNumber || row.titleNumber));
+
+    const detailFactsBatches = await mapWithConcurrency(rowsForDetail, official.detailConcurrency, async (row) => {
+      try {
+        const response = await fetchWithRetry(buildExtratoSicopUrl(row.titleNumber), 2);
+        if (!response) {
+          contractDetailErrors.push({
+            contractNumber: row.contractNumber,
+            titleNumber: row.titleNumber,
+            error: "Extrato SICOP não encontrado.",
+          });
+          return [];
+        }
+
+        const payload = await response.json();
+        fetchedContractDetails.push(row.contractNumber || row.titleNumber);
+        return buildDetailedFactsFromSicopDetail(row, payload);
+      } catch (error) {
+        contractDetailErrors.push({
+          contractNumber: row.contractNumber,
+          titleNumber: row.titleNumber,
+          error: error instanceof Error ? error.message : String(error),
+        });
+        return [];
+      }
+    });
+
+    detailedFacts = [...detailedFacts, ...detailFactsBatches.flat()].filter(Boolean);
   }
 }
 
 await fs.mkdir(outDir, { recursive: true });
 
-const aggregatedRecords = [...records.values()].sort((a, b) => {
-  const periodOrder = a.periodKey.localeCompare(b.periodKey);
-  if (periodOrder !== 0) return periodOrder;
-
-  const subelementoOrder = a.subelementoCode.localeCompare(b.subelementoCode);
-  if (subelementoOrder !== 0) return subelementoOrder;
-
-  return a.unidadeGestoraCode.localeCompare(b.unidadeGestoraCode);
-});
-
-const elementos = new Map();
-const subelementos = new Map();
-const unidades = new Map();
-const periodLabels = {};
-
-aggregatedRecords.forEach((record) => {
-  elementos.set(record.elementoCode, {
-    code: record.elementoCode,
-    name: record.elementoName,
-    label: record.elementoLabel,
-  });
-
-  subelementos.set(record.subelementoCode, {
-    code: record.subelementoCode,
-    name: record.subelementoName,
-    label: record.subelementoLabel,
-    elementoCode: record.elementoCode,
-  });
-
-  unidades.set(record.unidadeGestoraCode, {
-    code: record.unidadeGestoraCode,
-    name: record.unidadeGestoraName,
-    label: record.unidadeGestoraLabel,
-  });
-
-  periodLabels[record.periodKey] = record.monthLabel;
-});
-
 const output = {
   generatedAt: new Date().toISOString(),
   syncedAt: new Date().toISOString(),
-  source: "Portal da Transparência SC - API oficial de Despesa (Grupo Natureza 33 - Outras Despesas Correntes)",
+  source: "Portal da Transparência SC - API oficial de despesa e contratos",
   sourceSummary: {
     requestedPeriods,
     fetchedPeriods,
@@ -269,25 +173,27 @@ const output = {
     requestedPeriodsCount: requestedPeriods.length,
     fetchedPeriodsCount: fetchedPeriods.length,
     missingPeriodsCount: missingPeriods.length,
-    latestPeriodAvailable: aggregatedRecords.at(-1)?.periodKey || null,
-    latestPeriodLabel: aggregatedRecords.at(-1)?.monthLabel || null,
-    recordsAggregated: aggregatedRecords.length,
+    latestPeriodAvailable: aggregated.aggregatedRecords.at(-1)?.periodKey || null,
+    latestPeriodLabel: aggregated.aggregatedRecords.at(-1)?.monthLabel || null,
+    recordsAggregated: aggregated.aggregatedRecords.length,
   },
-  availableYears: [...new Set(aggregatedRecords.map((record) => record.year))].sort((a, b) => a - b),
-  periodLabels,
-  elementos: [...elementos.values()].sort((a, b) => a.label.localeCompare(b.label)),
-  subelementos: [...subelementos.values()].sort((a, b) => a.label.localeCompare(b.label)),
-  unidades: [...unidades.values()].sort((a, b) => a.label.localeCompare(b.label)),
-  facts: aggregatedRecords.map((record) => [
-    record.year,
-    record.month,
-    record.elementoCode,
-    record.subelementoCode,
-    record.unidadeGestoraCode,
-    record.vlempenhado,
-    record.vlliquidado,
-    record.vlpago,
-  ]),
+  contractsSourceSummary: {
+    dateRange: { startDate: contractsStartDate, endDate: contractsEndDate },
+    contractsFetched: contractRows.length,
+    contractsInDashboard: dashboardContractRows.length,
+    detailedFactsCount: detailedFacts.length,
+    detailedContractsFetched: fetchedContractDetails.length,
+    detailedContractsSkipped: skippedContractDetails.length,
+    detailedContractsWithError: contractDetailErrors.length,
+  },
+  availableYears: aggregated.availableYears,
+  periodLabels: aggregated.periodLabels,
+  elementos: aggregated.elementos,
+  subelementos: aggregated.subelementos,
+  unidades: aggregated.unidades,
+  facts: aggregated.facts,
+  detailedFacts,
+  procurementModeOptions,
 };
 
 try {
@@ -300,4 +206,6 @@ try {
 }
 
 await fs.writeFile(outFile, JSON.stringify(output));
-console.log(`Cache gerado em ${outFile} com ${aggregatedRecords.length} registros agregados.`);
+console.log(
+  `Cache gerado em ${outFile} com ${aggregated.aggregatedRecords.length} registros agregados, ${contractRows.length} contratos e ${detailedFacts.length} fatos detalhados.`
+);

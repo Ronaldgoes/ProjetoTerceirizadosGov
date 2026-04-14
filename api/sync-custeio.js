@@ -1,50 +1,35 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { fetchIpcaSeries } from "../src/utils/ipcaSeries.js";
+import {
+  buildAggregatedDataset,
+  buildContractsExportUrl,
+  buildDetailedFactsFromContracts,
+  buildDetailedFactsFromSicopDetail,
+  buildDespesaExportUrl,
+  buildExtratoSicopUrl,
+  buildProcurementModeOptions,
+  comparePeriod,
+  currentBrazilPeriod,
+  decodeCsv,
+  getContractReferencePeriod,
+  parseContractsCsv,
+  parseDespesaCsvToRecords,
+  parsePeriodKey,
+  periodEndDate,
+  periodKey,
+  shiftPeriod,
+  shouldFetchSicopDetail,
+} from "../src/utils/custeioOfficialPortal.js";
 
 const CACHE_FILE = path.join(process.cwd(), "public", "data", "custeio-oficial.json");
-const API_URL = "https://api-portal-transparencia.apps.sm.okd4.ciasc.sc.gov.br/api";
-const AGRUPAMENTOS = ["ano", "mes", "elemento", "subelemento", "unidadegestora"];
-const SUBELEMENTO_PREFIX = "33";
+const DETAIL_CONCURRENCY = 6;
+const CONTRACTS_HISTORY_MONTHS = 18;
+const CONTRACTS_LOOKBACK_MONTHS = 12;
 
 function json(res, statusCode, body) {
   res.status(statusCode).setHeader("Content-Type", "application/json");
   res.send(JSON.stringify(body));
-}
-
-function periodKey(year, month) {
-  return `${year}-${String(month).padStart(2, "0")}`;
-}
-
-function compactPeriodKey(year, month) {
-  return `${year}${String(month).padStart(2, "0")}`;
-}
-
-function parsePeriodKey(value) {
-  const [year, month] = String(value || "").split("-").map(Number);
-  return { year, month };
-}
-
-function shiftPeriod(value, offset) {
-  const { year, month } = parsePeriodKey(value);
-  const date = new Date(year, month - 1 + offset, 1);
-  return periodKey(date.getFullYear(), date.getMonth() + 1);
-}
-
-function comparePeriod(a, b) {
-  return a.localeCompare(b);
-}
-
-function currentBrazilPeriod() {
-  const formatter = new Intl.DateTimeFormat("en-CA", {
-    timeZone: "America/Sao_Paulo",
-    year: "numeric",
-    month: "2-digit",
-  });
-  const parts = formatter.formatToParts(new Date());
-  const year = parts.find((part) => part.type === "year")?.value;
-  const month = parts.find((part) => part.type === "month")?.value;
-  return `${year}-${month}`;
 }
 
 function buildPeriodsToRefresh(latestAvailable) {
@@ -59,147 +44,6 @@ function buildPeriodsToRefresh(latestAvailable) {
   }
 
   return [...new Set(periods)];
-}
-
-function buildExportUrl(year, month) {
-  const url = new URL(`${API_URL}/despesa/exportcsv`);
-  const value = compactPeriodKey(year, month);
-  url.searchParams.append("anomesinifiltro[]", value);
-  url.searchParams.append("anomesfimfiltro[]", value);
-  AGRUPAMENTOS.forEach((group) => url.searchParams.append("agrupamentos[]", group));
-  url.searchParams.set("indicador", "0");
-  return url.toString();
-}
-
-function parseBrazilianNumber(value) {
-  const normalized = String(value || "0")
-    .replace(/\./g, "")
-    .replace(",", ".")
-    .replace(/[^\d.-]/g, "");
-  const parsed = Number(normalized);
-  return Number.isFinite(parsed) ? parsed : 0;
-}
-
-function normalizeHeader(value) {
-  return String(value || "")
-    .normalize("NFD")
-    .replace(/\p{Diacritic}/gu, "")
-    .toLowerCase()
-    .trim();
-}
-
-function splitCsvLine(line) {
-  if (typeof line !== "string") return [];
-
-  const result = [];
-  let current = "";
-  let inQuotes = false;
-
-  for (let i = 0; i < line.length; i += 1) {
-    const char = line[i];
-    const next = line[i + 1];
-
-    if (char === '"') {
-      if (inQuotes && next === '"') {
-        current += '"';
-        i += 1;
-      } else {
-        inQuotes = !inQuotes;
-      }
-      continue;
-    }
-
-    if (char === ";" && !inQuotes) {
-      result.push(current);
-      current = "";
-      continue;
-    }
-
-    current += char;
-  }
-
-  result.push(current);
-  return result.map((item) => item.trim());
-}
-
-function mapHeader(header) {
-  const index = {};
-  header.forEach((column, idx) => {
-    index[normalizeHeader(column)] = idx;
-  });
-  return index;
-}
-
-function getCell(row, idx, columnName) {
-  const position = idx[normalizeHeader(columnName)];
-  return position === undefined ? "" : row[position] || "";
-}
-
-function decodeCsv(buffer) {
-  const utf8 = buffer.toString("utf-8");
-  if (!utf8.includes("\uFFFD")) return utf8;
-  return buffer.toString("latin1");
-}
-
-function parseCsvToRecords(text, accumulator) {
-  const lines = text.split(/\r?\n/).filter(Boolean);
-  if (lines.length < 2) return;
-
-  const header = splitCsvLine(lines[0]);
-  const idx = mapHeader(header);
-
-  lines.slice(1).forEach((line) => {
-    const row = splitCsvLine(line);
-
-    const year = Number(getCell(row, idx, "nuano"));
-    const month = Number(getCell(row, idx, "numes"));
-    const monthLabel = getCell(row, idx, "nmmes").trim();
-    const elementoCode = getCell(row, idx, "cdelemento").trim();
-    const elementoName = getCell(row, idx, "nmelemento").trim();
-    const subelementoCode = getCell(row, idx, "cdsubelemento").trim();
-    const subelementoName = getCell(row, idx, "nmsubelemento").trim();
-    const unidadeCode = getCell(row, idx, "cdunidadegestora").trim() || "00000";
-    const unidadeName = getCell(row, idx, "nmunidadegestora").trim() || "Nao Informado";
-
-    if (!year || !month || !subelementoCode || !subelementoCode.startsWith(SUBELEMENTO_PREFIX)) return;
-
-    const recordKey = [
-      year,
-      String(month).padStart(2, "0"),
-      elementoCode,
-      elementoName,
-      subelementoCode,
-      subelementoName,
-      unidadeCode,
-      unidadeName,
-    ].join("|");
-
-    const current =
-      accumulator.get(recordKey) ||
-      {
-        year,
-        month,
-        monthLabel,
-        periodKey: periodKey(year, month),
-        elementoCode,
-        elementoName,
-        elementoLabel: `${elementoCode} - ${elementoName}`.trim(),
-        subelementoCode,
-        subelementoName,
-        subelementoLabel: `${subelementoCode} - ${subelementoName}`.trim(),
-        unidadeGestoraCode: unidadeCode,
-        unidadeGestoraName: unidadeName,
-        unidadeGestoraLabel: `${unidadeCode} - ${unidadeName}`.trim(),
-        vlempenhado: 0,
-        vlliquidado: 0,
-        vlpago: 0,
-      };
-
-    current.vlempenhado += parseBrazilianNumber(getCell(row, idx, "vlempenhado"));
-    current.vlliquidado += parseBrazilianNumber(getCell(row, idx, "vlliquidado"));
-    current.vlpago += parseBrazilianNumber(getCell(row, idx, "vlpago"));
-    accumulator.set(recordKey, current);
-  });
 }
 
 async function fetchWithRetry(url, retries = 2) {
@@ -218,69 +62,116 @@ async function fetchWithRetry(url, retries = 2) {
   return null;
 }
 
+async function mapWithConcurrency(items, concurrency, worker) {
+  const results = [];
+  let cursor = 0;
+
+  async function consume() {
+    while (cursor < items.length) {
+      const currentIndex = cursor;
+      cursor += 1;
+      results[currentIndex] = await worker(items[currentIndex], currentIndex);
+    }
+  }
+
+  const workers = Array.from({ length: Math.max(1, Math.min(concurrency, items.length || 1)) }, consume);
+  await Promise.all(workers);
+  return results;
+}
+
 function buildPatch(records, refreshedPeriods, fetchedPeriods, missingPeriods) {
-  const aggregatedRecords = [...records.values()].sort((a, b) => {
-    const periodOrder = a.periodKey.localeCompare(b.periodKey);
-    if (periodOrder !== 0) return periodOrder;
-
-    const subelementoOrder = a.subelementoCode.localeCompare(b.subelementoCode);
-    if (subelementoOrder !== 0) return subelementoOrder;
-
-    return a.unidadeGestoraCode.localeCompare(b.unidadeGestoraCode);
-  });
-
-  const elementos = new Map();
-  const subelementos = new Map();
-  const unidades = new Map();
-  const periodLabels = {};
-
-  aggregatedRecords.forEach((record) => {
-    elementos.set(record.elementoCode, {
-      code: record.elementoCode,
-      name: record.elementoName,
-      label: record.elementoLabel,
-    });
-
-    subelementos.set(record.subelementoCode, {
-      code: record.subelementoCode,
-      name: record.subelementoName,
-      label: record.subelementoLabel,
-      elementoCode: record.elementoCode,
-    });
-
-    unidades.set(record.unidadeGestoraCode, {
-      code: record.unidadeGestoraCode,
-      name: record.unidadeGestoraName,
-      label: record.unidadeGestoraLabel,
-    });
-
-    periodLabels[record.periodKey] = record.monthLabel;
-  });
+  const aggregated = buildAggregatedDataset(records);
 
   return {
     syncedAt: new Date().toISOString(),
     refreshedPeriods,
-    periodLabels,
-    elementos: [...elementos.values()],
-    subelementos: [...subelementos.values()],
-    unidades: [...unidades.values()],
-    facts: aggregatedRecords.map((record) => [
-      record.year,
-      record.month,
-      record.elementoCode,
-      record.subelementoCode,
-      record.unidadeGestoraCode,
-      record.vlempenhado,
-      record.vlliquidado,
-      record.vlpago,
-    ]),
+    periodLabels: aggregated.periodLabels,
+    elementos: aggregated.elementos,
+    subelementos: aggregated.subelementos,
+    unidades: aggregated.unidades,
+    facts: aggregated.facts,
+    availableYears: aggregated.availableYears,
     sourceSummary: {
       requestedPeriodsCount: refreshedPeriods.length,
       fetchedPeriodsCount: fetchedPeriods.length,
       missingPeriodsCount: missingPeriods.length,
-      latestPeriodAvailable: aggregatedRecords.at(-1)?.periodKey || null,
-      latestPeriodLabel: aggregatedRecords.at(-1)?.monthLabel || null,
-      recordsAggregated: aggregatedRecords.length,
+      latestPeriodAvailable: aggregated.aggregatedRecords.at(-1)?.periodKey || null,
+      latestPeriodLabel: aggregated.aggregatedRecords.at(-1)?.monthLabel || null,
+      recordsAggregated: aggregated.aggregatedRecords.length,
+    },
+  };
+}
+
+async function buildContractsPatch(cache, latestAvailablePeriod) {
+  const currentPeriod = currentBrazilPeriod();
+  const endDate = periodEndDate(latestAvailablePeriod || cache?.sourceSummary?.latestPeriodAvailable || currentPeriod);
+  const startYear = Array.isArray(cache?.availableYears) && cache.availableYears.length > 0
+    ? Math.min(...cache.availableYears)
+    : new Date().getFullYear();
+  const startDate = `${startYear}-01-01`;
+
+  const contractsResponse = await fetchWithRetry(buildContractsExportUrl(startDate, endDate));
+  if (!contractsResponse) {
+    return {
+      detailedFacts: cache?.detailedFacts || [],
+      procurementModeOptions: cache?.procurementModeOptions || [],
+      contractsSourceSummary: {
+        ...(cache?.contractsSourceSummary || {}),
+        lastError: "Exportação oficial de contratos não encontrada.",
+      },
+    };
+  }
+
+  const buffer = Buffer.from(await contractsResponse.arrayBuffer());
+  const contractRows = parseContractsCsv(decodeCsv(buffer));
+  const procurementModeOptions = buildProcurementModeOptions(contractRows);
+  const dashboardThreshold = shiftPeriod(latestAvailablePeriod || currentPeriod, -CONTRACTS_HISTORY_MONTHS);
+  const dashboardContractRows = contractRows.filter((row) => {
+    const referencePeriod = getContractReferencePeriod(row);
+    return referencePeriod ? comparePeriod(referencePeriod, dashboardThreshold) >= 0 : false;
+  });
+  let detailedFacts = buildDetailedFactsFromContracts(dashboardContractRows);
+  const contractDetailErrors = [];
+  const fetchedContractDetails = [];
+
+  const detailRows = dashboardContractRows.filter((row) => shouldFetchSicopDetail(row, latestAvailablePeriod, CONTRACTS_LOOKBACK_MONTHS));
+  const detailBatches = await mapWithConcurrency(detailRows, DETAIL_CONCURRENCY, async (row) => {
+    try {
+      const response = await fetchWithRetry(buildExtratoSicopUrl(row.titleNumber), 1);
+      if (!response) {
+        contractDetailErrors.push({
+          contractNumber: row.contractNumber,
+          titleNumber: row.titleNumber,
+          error: "Extrato SICOP não encontrado.",
+        });
+        return [];
+      }
+
+      const payload = await response.json();
+      fetchedContractDetails.push(row.contractNumber || row.titleNumber);
+      return buildDetailedFactsFromSicopDetail(row, payload);
+    } catch (error) {
+      contractDetailErrors.push({
+        contractNumber: row.contractNumber,
+        titleNumber: row.titleNumber,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      return [];
+    }
+  });
+
+  detailedFacts = [...detailedFacts, ...detailBatches.flat()].filter(Boolean);
+
+  return {
+    detailedFacts,
+    procurementModeOptions,
+    contractsSourceSummary: {
+      dateRange: { startDate, endDate },
+      contractsFetched: contractRows.length,
+      contractsInDashboard: dashboardContractRows.length,
+      detailedFactsCount: detailedFacts.length,
+      detailedContractsFetched: fetchedContractDetails.length,
+      detailedContractsWithError: contractDetailErrors.length,
     },
   };
 }
@@ -301,7 +192,7 @@ export default async function handler(req, res) {
 
     for (const value of refreshedPeriods) {
       const { year, month } = parsePeriodKey(value);
-      const response = await fetchWithRetry(buildExportUrl(year, month));
+      const response = await fetchWithRetry(buildDespesaExportUrl(year, month));
 
       if (!response) {
         missingPeriods.push(value);
@@ -309,11 +200,26 @@ export default async function handler(req, res) {
       }
 
       const buffer = Buffer.from(await response.arrayBuffer());
-      parseCsvToRecords(decodeCsv(buffer), records);
+      parseDespesaCsvToRecords(decodeCsv(buffer), records);
       fetchedPeriods.push(value);
     }
 
     const patch = buildPatch(records, refreshedPeriods, fetchedPeriods, missingPeriods);
+    const latestPatchPeriod = patch?.sourceSummary?.latestPeriodAvailable || latestAvailable || currentBrazilPeriod();
+
+    try {
+      const contractsPatch = await buildContractsPatch(cache, latestPatchPeriod);
+      patch.detailedFacts = contractsPatch.detailedFacts;
+      patch.procurementModeOptions = contractsPatch.procurementModeOptions;
+      patch.contractsSourceSummary = contractsPatch.contractsSourceSummary;
+    } catch (error) {
+      patch.detailedFacts = cache?.detailedFacts || [];
+      patch.procurementModeOptions = cache?.procurementModeOptions || [];
+      patch.contractsSourceSummary = {
+        ...(cache?.contractsSourceSummary || {}),
+        lastError: error instanceof Error ? error.message : "Falha ao atualizar contratos oficiais.",
+      };
+    }
 
     try {
       const ipcaSeries = await fetchIpcaSeries();

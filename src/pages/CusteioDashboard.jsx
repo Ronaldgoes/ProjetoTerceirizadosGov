@@ -1,16 +1,21 @@
 ﻿import { useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { useCallback } from "react";
+import { memo } from "react";
 import html2canvas from "html2canvas";
 import { jsPDF } from "jspdf";
+import { List as VirtualList } from "react-window";
 import * as XLSX from "xlsx";
 import MatrixPanelView from "../components/MatrixPanel";
 import TopBar from "../components/TopBar";
 import { CUSTEIO_DATA_CONTRACT } from "../config/custeioDataContract";
 import { CUSTEIO_DATA_SOURCE } from "../config/custeioDataSource";
 import { useAuth } from "../hooks/useAuth";
+import { getPreLiquidacao, groupByUgSubelemento } from "../utils/groupCusteio";
 import { loadCusteioSyncPatch, mergeCusteioDataset, saveCusteioSyncPatch } from "../utils/custeioSyncSession";
 import { buildMatrixRows as buildMatrixRowsHelper } from "../utils/matrix";
+import { searchByText } from "../utils/searchCusteio";
+import { matchesSearchQuery, normalizeText } from "../utils/textHelpers";
 
 const METRICS = [
   { key: "vlempenhado", label: "Empenhamento" },
@@ -28,9 +33,24 @@ const PAGE_TABS = [
   { key: "matrix", label: "Matriz" },
   { key: "ugRanking", label: "Evolução" },
   { key: "alerts", label: "Alertas" },
+  { key: "creditorConcentration", label: "Concentração" },
+  { key: "withoutContract", label: "Sem Contrato" },
+  { key: "preLiquidationPayments", label: "Pag. Pré-Liquidação" },
+  { key: "itemServices", label: "Itens/Serviços" },
+  { key: "itemVariation", label: "Variação Itens" },
+  { key: "procurementModes", label: "Modalidades" },
+  { key: "contracts", label: "Contratos" },
 ];
 
 const MONTH_SHORT_LABELS = ["Jan", "Fev", "Mar", "Abr", "Mai", "Jun", "Jul", "Ago", "Set", "Out", "Nov", "Dez"];
+const SEARCH_DEBOUNCE_MS = 300;
+const TABLE_INITIAL_LIMIT = 100;
+const TABLE_INCREMENT = 100;
+const VIRTUAL_ALERT_ROW_HEIGHT = 88;
+const VIRTUAL_ALERT_VIEWPORT_HEIGHT = 620;
+const VIRTUAL_TABLE_VIEWPORT_HEIGHT = 620;
+const VIRTUAL_CONCENTRATION_ROW_HEIGHT = 108;
+const VIRTUAL_PRELIQUIDATION_ROW_HEIGHT = 148;
 
 const IPCA_ANUAL_FALLBACK = {
   2021: 10.06,
@@ -124,6 +144,132 @@ const fmtPercent = (value) => {
   if (!Number.isFinite(value)) return "--";
   return `${value >= 0 ? "+" : ""}${value.toFixed(1)}%`;
 };
+
+function useDebouncedValue(value, delay = SEARCH_DEBOUNCE_MS) {
+  const [debounced, setDebounced] = useState(value);
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => setDebounced(value), delay);
+    return () => window.clearTimeout(timer);
+  }, [delay, value]);
+
+  return debounced;
+}
+
+function buildSearchIndex(values) {
+  return values.map((item) => normalize(item)).filter(Boolean).join(" ");
+}
+
+const LoadMoreControl = memo(function LoadMoreControl({
+  visibleCount,
+  totalCount,
+  onLoadMore,
+  increment = TABLE_INCREMENT,
+}) {
+  if (totalCount <= visibleCount) return null;
+
+  return (
+    <div className="bi-load-more">
+      <span>{`Exibindo ${visibleCount} de ${totalCount} registros`}</span>
+      <button type="button" className="bi-inline-button" onClick={onLoadMore}>
+        {`Ver mais ${Math.min(increment, totalCount - visibleCount)}`}
+      </button>
+    </div>
+  );
+});
+
+const ProgressiveRows = memo(function ProgressiveRows({
+  rows,
+  renderRow,
+  initialCount = TABLE_INITIAL_LIMIT,
+  increment = TABLE_INCREMENT,
+}) {
+  const [visibleCount, setVisibleCount] = useState(initialCount);
+
+  useEffect(() => {
+    setVisibleCount(initialCount);
+  }, [initialCount, rows]);
+
+  const visibleRows = useMemo(() => rows.slice(0, visibleCount), [rows, visibleCount]);
+  const handleLoadMore = useCallback(() => {
+    setVisibleCount((current) => Math.min(rows.length, current + increment));
+  }, [increment, rows.length]);
+
+  return (
+    <>
+      {visibleRows.map(renderRow)}
+      <LoadMoreControl
+        visibleCount={visibleRows.length}
+        totalCount={rows.length}
+        onLoadMore={handleLoadMore}
+        increment={increment}
+      />
+    </>
+  );
+});
+
+const VirtualizedAlertRows = memo(function VirtualizedAlertRows({
+  rows,
+  renderRow,
+  rowHeight = VIRTUAL_ALERT_ROW_HEIGHT,
+  viewportHeight = VIRTUAL_ALERT_VIEWPORT_HEIGHT,
+  overscan = 6,
+  initialCount = TABLE_INITIAL_LIMIT,
+  increment = TABLE_INCREMENT,
+}) {
+  const [visibleCount, setVisibleCount] = useState(initialCount);
+  const [scrollTop, setScrollTop] = useState(0);
+
+  useEffect(() => {
+    setVisibleCount(initialCount);
+    setScrollTop(0);
+  }, [initialCount, rows]);
+
+  const scopedRows = useMemo(() => rows.slice(0, visibleCount), [rows, visibleCount]);
+  const totalHeight = scopedRows.length * rowHeight;
+  const startIndex = Math.max(0, Math.floor(scrollTop / rowHeight) - overscan);
+  const visibleItems = Math.ceil(viewportHeight / rowHeight) + overscan * 2;
+  const endIndex = Math.min(scopedRows.length, startIndex + visibleItems);
+  const virtualRows = useMemo(
+    () => scopedRows.slice(startIndex, endIndex),
+    [endIndex, scopedRows, startIndex]
+  );
+
+  const handleScroll = useCallback((event) => {
+    setScrollTop(event.currentTarget.scrollTop);
+  }, []);
+
+  const handleLoadMore = useCallback(() => {
+    setVisibleCount((current) => Math.min(rows.length, current + increment));
+  }, [increment, rows.length]);
+
+  return (
+    <>
+      <div className="bi-virtual-scroll" style={{ height: viewportHeight }} onScroll={handleScroll}>
+        <div className="bi-virtual-scroll-inner" style={{ height: totalHeight }}>
+          {virtualRows.map((row, offset) => {
+            const absoluteIndex = startIndex + offset;
+            return (
+              <div
+                key={row.label || row.key || row.id || absoluteIndex}
+                className="bi-virtual-row-shell"
+                style={{ height: rowHeight, transform: `translateY(${absoluteIndex * rowHeight}px)` }}
+              >
+                {renderRow(row, absoluteIndex)}
+              </div>
+            );
+          })}
+        </div>
+      </div>
+      <LoadMoreControl
+        visibleCount={scopedRows.length}
+        totalCount={rows.length}
+        onLoadMore={handleLoadMore}
+        increment={increment}
+      />
+    </>
+  );
+});
 
 const trimSheetName = (name) => String(name || "Dados").replace(/[\\/*?:[\]]/g, " ").slice(0, 31);
 
@@ -525,12 +671,550 @@ function formatValueAndPercentLine(value, percent) {
   return `${fmtPercent(safePercent)} | ${fmtCurrency(safeValue)}`;
 }
 
-const normalize = (value) =>
-  String(value || "")
-    .toLowerCase()
-    .normalize("NFD")
-    .replace(/\p{Diacritic}/gu, "")
-    .trim();
+function getIpcaReferenceLabel(variation, ipcaValue) {
+  if (!Number.isFinite(variation) || !Number.isFinite(ipcaValue)) return null;
+
+  const delta = variation - ipcaValue;
+  if (delta <= 0) return "Abaixo do IPCA";
+  if (delta <= 2) return "Próximo do IPCA";
+  return "Acima do IPCA";
+}
+
+const normalize = (value) => normalizeText(value);
+
+function buildUgSubelementoLookupKey(record) {
+  return `${String(record?.unidadeGestoraCode || record?.ug || "").trim()}-${String(
+    record?.subelementoCode || record?.subelemento || ""
+  ).trim()}`;
+}
+
+function normalizeProcurementModeValue(value) {
+  return normalize(value).replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+}
+
+function coalesceDetailedField(record, keys = [], fallback = "") {
+  for (const key of keys) {
+    const value = record?.[key];
+    if (value !== undefined && value !== null && String(value).trim() !== "") {
+      return value;
+    }
+  }
+
+  return fallback;
+}
+
+function parseFlexibleDate(value) {
+  if (!value) return null;
+  if (value instanceof Date && !Number.isNaN(value.getTime())) return value;
+
+  const raw = String(value).trim();
+  if (!raw) return null;
+
+  const isoDate = raw.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (isoDate) {
+    const [, yearText, monthText, dayText] = isoDate;
+    const date = new Date(Number(yearText), Number(monthText) - 1, Number(dayText));
+    return Number.isNaN(date.getTime()) ? null : date;
+  }
+
+  const brDate = raw.match(/^(\d{2})\/(\d{2})\/(\d{4})$/);
+  if (brDate) {
+    const [, dayText, monthText, yearText] = brDate;
+    const date = new Date(Number(yearText), Number(monthText) - 1, Number(dayText));
+    return Number.isNaN(date.getTime()) ? null : date;
+  }
+
+  const timestamp = Date.parse(raw);
+  if (Number.isNaN(timestamp)) return null;
+  return new Date(timestamp);
+}
+
+function formatDetailedDate(value) {
+  const parsed = parseFlexibleDate(value);
+  return parsed
+    ? new Intl.DateTimeFormat("pt-BR", { dateStyle: "short" }).format(parsed)
+    : "--";
+}
+
+function getDetailedMetricValue(record, metricKey) {
+  if (!record || !metricKey) return 0;
+  return Number(record[metricKey] || 0);
+}
+
+function getProcurementCategory(record) {
+  const rawCategory = normalize(
+    coalesceDetailedField(record, ["procurementCategory", "tipoContratacao", "tipoLicitacao"], "")
+  );
+  if (rawCategory.includes("inexig")) return "Inexigibilidade";
+  if (rawCategory.includes("dispensa")) return "Dispensa";
+
+  const dispensationFlag = ["true", "1", "sim"].includes(
+    normalize(coalesceDetailedField(record, ["dispensaLicitacao", "isDispensaLicitacao", "dispensa"], ""))
+  );
+  if (dispensationFlag) return "Dispensa";
+
+  const procurementMode = normalize(
+    coalesceDetailedField(record, ["procurementMode", "modalidadeLicitacao", "modalidade"], "")
+  );
+  if (procurementMode.includes("inexig")) return "Inexigibilidade";
+  if (procurementMode.includes("dispensa")) return "Dispensa";
+  if (procurementMode) return "Licitação";
+  return "";
+}
+
+function getIPCAForRow(row, valueKey, ipcaAnnual, ipcaMonthly) {
+  if (!row) return null;
+  const sourceKey = row?.[valueKey];
+  if (!sourceKey) return null;
+  if (valueKey === "year") {
+    const value = ipcaAnnual?.[String(sourceKey).slice(0, 4)];
+    return Number.isFinite(value) ? value : null;
+  }
+  const value = ipcaMonthly?.[String(sourceKey)];
+  return Number.isFinite(value) ? value : null;
+}
+
+function extractDetailedRecords(dataset) {
+  if (!Array.isArray(dataset?.detailedFacts)) return [];
+
+  return dataset.detailedFacts
+    .map((record, index) => {
+      if (!record || typeof record !== "object" || Array.isArray(record)) return null;
+
+      const year = Number(coalesceDetailedField(record, ["year", "nuano"], 0));
+      const month = Number(coalesceDetailedField(record, ["month", "numes"], 0));
+      const periodKey = coalesceDetailedField(
+        record,
+        ["periodKey", "period", "periodo"],
+        year && month ? `${year}-${String(month).padStart(2, "0")}` : ""
+      );
+
+      const creditorDocument = String(
+        coalesceDetailedField(record, ["creditorDocument", "nucredor", "cpfCnpjCredor", "cpfcnpjcredor"], "")
+      ).trim();
+      const creditorName = String(
+        coalesceDetailedField(record, ["creditorName", "nmcredor", "credorName", "favorecido"], "Não informado")
+      ).trim();
+
+      const procurementModeRaw = String(
+        coalesceDetailedField(record, ["procurementMode", "modalidadeLicitacao", "modalidade"], "")
+      ).trim();
+      const isDispensation = ["true", "1", "sim"].includes(
+        normalize(coalesceDetailedField(record, ["dispensaLicitacao", "isDispensaLicitacao", "dispensa"], ""))
+      );
+      const procurementMode = procurementModeRaw || (isDispensation ? "Dispensa de Licitação" : "");
+      const procurementCategory = getProcurementCategory(record);
+      const contractNumber = String(
+        coalesceDetailedField(record, ["contractNumber", "numeroContrato", "nunumerocontrato", "contrato"], "")
+      ).trim();
+      const nutitulo = String(
+        coalesceDetailedField(record, ["nutitulo", "nuTitulo", "titulo"], "")
+      ).trim();
+      const legalInstrument = String(
+        coalesceDetailedField(record, ["legalInstrument", "instrumentoLegal", "instrumento"], "")
+      ).trim();
+      const sourceOrigin = String(
+        coalesceDetailedField(record, ["sourceOrigin", "origemFonte", "origem"], "")
+      ).trim();
+      const quantity = Number(
+        coalesceDetailedField(record, ["quantity", "quantidade", "qtitem", "qtd"], 0)
+      ) || 0;
+      const unitValue = Number(
+        coalesceDetailedField(record, ["unitValue", "valorUnitario", "vlunitario"], 0)
+      ) || 0;
+      const vlempenhado = Number(coalesceDetailedField(record, ["vlempenhado", "valorEmpenhado"], 0)) || 0;
+      const vlliquidado = Number(coalesceDetailedField(record, ["vlliquidado", "valorLiquidado"], 0)) || 0;
+      const vlpago = Number(coalesceDetailedField(record, ["vlpago", "valorPago"], 0)) || 0;
+      const fallbackValue = Number(
+        coalesceDetailedField(record, ["value", "valor", "valorTotal"], 0)
+      ) || 0;
+      const totalValue =
+        Number(coalesceDetailedField(record, ["totalValue", "valorTotalItem", "valorTotal"], 0)) ||
+        vlpago ||
+        vlliquidado ||
+        vlempenhado ||
+        fallbackValue;
+      const contractStartDate = coalesceDetailedField(
+        record,
+        ["contractStartDate", "dataInicioVigencia", "dataInicioContrato", "dtinicio"],
+        ""
+      );
+      const contractEndDate = coalesceDetailedField(
+        record,
+        ["contractEndDate", "dataFimVigencia", "dataFimContrato", "dtfim"],
+        ""
+      );
+      const isFundSupply = ["true", "1", "sim"].includes(
+        normalize(coalesceDetailedField(record, ["isFundSupply", "suprimentoFundos", "modalidadeSuprimento"], ""))
+      ) || normalize(procurementMode).includes("suprimento");
+      const hasContract = Boolean(contractNumber || legalInstrument);
+      const unidadeGestoraCode = String(
+        coalesceDetailedField(record, ["unidadeGestoraCode", "cdunidadegestora"], "")
+      ).trim();
+      const unidadeGestoraLabel = String(
+        coalesceDetailedField(record, ["unidadeGestoraLabel", "nmunidadegestora", "unidadeGestoraName"], "")
+      ).trim();
+      const elementoCode = String(coalesceDetailedField(record, ["elementoCode", "cdelemento"], "")).trim();
+      const elementoLabel = String(
+        coalesceDetailedField(record, ["elementoLabel", "nmelemento", "elementoName"], "")
+      ).trim();
+      const subelementoCode = String(coalesceDetailedField(record, ["subelementoCode", "cdsubelemento"], "")).trim();
+      const subelementoLabel = String(
+        coalesceDetailedField(record, ["subelementoLabel", "nmsubelemento", "subelementoName"], "")
+      ).trim();
+      const classification = String(
+        coalesceDetailedField(record, ["classification", "classificacao"], "")
+      ).trim();
+      const historico = String(
+        coalesceDetailedField(record, ["historico", "history"], "")
+      ).trim();
+      const resumoObjetoContrato = String(
+        coalesceDetailedField(record, ["resumoObjetoContrato", "resumoObjeto"], "")
+      ).trim();
+      const objetoContrato = String(
+        coalesceDetailedField(record, ["objetoContrato", "contractObject", "objeto"], "")
+      ).trim();
+      const contractObject = objetoContrato;
+      const description = String(
+        coalesceDetailedField(record, ["description", "descricao"], "")
+      ).trim();
+      const creditorLabel = creditorDocument ? `${creditorDocument} - ${creditorName}` : creditorName;
+      const empenhoNumber = String(
+        coalesceDetailedField(record, ["empenhoNumber", "nunotaempenho", "numeroEmpenho"], "")
+      ).trim();
+      const ordemBancariaNumber = String(
+        coalesceDetailedField(record, ["ordemBancariaNumber", "nuordembancaria", "numeroOB"], "")
+      ).trim();
+      const paymentDate = coalesceDetailedField(record, ["paymentDate", "dtdatapagamento", "dataPagamento"], "");
+      const liquidationDate = coalesceDetailedField(record, ["liquidationDate", "dtliquidacao", "dataLiquidacao"], "");
+      const searchIndex = buildSearchIndex([
+        periodKey,
+        year,
+        month,
+        unidadeGestoraCode,
+        unidadeGestoraLabel,
+        elementoCode,
+        elementoLabel,
+        subelementoCode,
+        subelementoLabel,
+        creditorDocument,
+        creditorName,
+        creditorLabel,
+        classification,
+        historico,
+        resumoObjetoContrato,
+        objetoContrato,
+        contractObject,
+        description,
+        procurementMode,
+        contractNumber,
+        nutitulo,
+        legalInstrument,
+        empenhoNumber,
+        ordemBancariaNumber,
+        paymentDate,
+        liquidationDate,
+        sourceOrigin,
+      ]);
+
+      return {
+        id: String(coalesceDetailedField(record, ["id"], `detail-${index}`)),
+        year: year || null,
+        month: month || null,
+        periodKey,
+        elementoCode,
+        elementoLabel,
+        subelementoCode,
+        subelementoLabel,
+        unidadeGestoraCode,
+        unidadeGestoraLabel,
+        creditorDocument,
+        creditorName,
+        creditorLabel,
+        classification,
+        historico,
+        resumoObjetoContrato,
+        objetoContrato,
+        contractObject,
+        description,
+        procurementMode,
+        procurementModeValue: normalizeProcurementModeValue(procurementMode),
+        procurementCategory,
+        nutitulo,
+        sourceOrigin,
+        empenhoNumber,
+        ordemBancariaNumber,
+        paymentDate,
+        liquidationDate,
+        contractNumber,
+        legalInstrument,
+        contractStartDate,
+        contractEndDate,
+        hasContract,
+        isFundSupply,
+        quantity,
+        unitValue,
+        value: totalValue,
+        totalValue,
+        vlempenhado: vlempenhado || totalValue,
+        vlliquidado: vlliquidado || 0,
+        vlpago: vlpago || 0,
+        searchIndex,
+      };
+    })
+    .filter(Boolean);
+}
+
+function buildCreditorConcentrationRows(records, filters) {
+  return groupByUgSubelemento(records, filters);
+}
+
+function buildMissingContractRows(records) {
+  return records
+    .filter((record) => !record.hasContract && !record.isFundSupply)
+    .sort((a, b) => getDetailedMetricValue(b, "vlempenhado") - getDetailedMetricValue(a, "vlempenhado"));
+}
+
+function buildItemServiceRows(records, metricKey) {
+  const groups = new Map();
+
+  records.forEach((record) => {
+    const descriptor =
+      record.description ||
+      record.contractObject ||
+      record.classification ||
+      "Item/serviço não identificado";
+    const key = [
+      descriptor,
+      record.unidadeGestoraLabel || "UG não informada",
+      record.classification || "--",
+      record.contractObject || "--",
+    ].join("|");
+
+    const current = groups.get(key) || {
+      key,
+      description: descriptor,
+      classification: record.classification || "--",
+      contractObject: record.contractObject || "--",
+      unidadeGestoraLabel: record.unidadeGestoraLabel || "UG não informada",
+      quantity: 0,
+      totalValue: 0,
+      unitValues: [],
+      quantityRecords: 0,
+    };
+
+    const recordQuantity = Number(record.quantity || 0);
+    current.quantity += recordQuantity;
+    current.totalValue += getDetailedMetricValue(record, metricKey) || record.totalValue || 0;
+    if (recordQuantity > 0) current.quantityRecords += 1;
+    if (Number(record.unitValue || 0) > 0) current.unitValues.push(Number(record.unitValue));
+    groups.set(key, current);
+  });
+
+  return [...groups.values()]
+    .map((item) => ({
+      ...item,
+      unitValue:
+        item.unitValues.length > 0
+          ? item.unitValues.reduce((acc, value) => acc + value, 0) / item.unitValues.length
+          : item.quantity > 0
+            ? item.totalValue / item.quantity
+            : null,
+    }))
+    .sort((a, b) => b.totalValue - a.totalValue);
+}
+
+function buildItemVariationRows(records, metricKey, startPeriodKey, endPeriodKey, ipcaValue) {
+  if (!startPeriodKey || !endPeriodKey) return [];
+
+  const groups = new Map();
+
+  records.forEach((record) => {
+    if (![startPeriodKey, endPeriodKey].includes(record.periodKey)) return;
+
+    const descriptor =
+      record.description ||
+      record.contractObject ||
+      record.classification ||
+      "Item/serviço não identificado";
+    const key = [
+      descriptor,
+      record.unidadeGestoraLabel || "UG não informada",
+    ].join("|");
+    const current = groups.get(key) || {
+      key,
+      description: descriptor,
+      unidadeGestoraLabel: record.unidadeGestoraLabel || "UG não informada",
+      classification: record.classification || "--",
+      contractObject: record.contractObject || "--",
+      startValue: 0,
+      endValue: 0,
+    };
+
+    if (record.periodKey === startPeriodKey) current.startValue += getDetailedMetricValue(record, metricKey) || record.totalValue || 0;
+    if (record.periodKey === endPeriodKey) current.endValue += getDetailedMetricValue(record, metricKey) || record.totalValue || 0;
+
+    groups.set(key, current);
+  });
+
+  return [...groups.values()]
+    .map((item) => {
+      const meta = getVariationMeta(item.startValue, item.endValue);
+      const resolvedIpcaValue = Number.isFinite(ipcaValue) ? ipcaValue : null;
+      return {
+        ...item,
+        variationPercent: meta.percent,
+        variationLabel: meta.label,
+        ipcaValue: resolvedIpcaValue,
+      };
+    })
+    .filter((item) => item.startValue > 0 || item.endValue > 0)
+    .sort((a, b) => {
+      if (!Number.isFinite(a.variationPercent)) return -1;
+      if (!Number.isFinite(b.variationPercent)) return 1;
+      return b.variationPercent - a.variationPercent;
+    });
+}
+
+function buildProcurementModeRows(records, metricKey) {
+  const groups = new Map();
+
+  records.forEach((record) => {
+    const category = record.procurementCategory || "Não classificado";
+    const mode = record.procurementMode || category;
+    const key = `${category}|${mode}`;
+    const current = groups.get(key) || {
+      key,
+      category,
+      mode,
+      totalValue: 0,
+    };
+    current.totalValue += getDetailedMetricValue(record, metricKey) || record.totalValue || 0;
+    groups.set(key, current);
+  });
+
+  return [...groups.values()].sort((a, b) => b.totalValue - a.totalValue);
+}
+
+function buildContractRows(records) {
+  const today = new Date();
+  const sixMonthsFromNow = new Date(today.getFullYear(), today.getMonth() + 6, today.getDate());
+
+  const contracts = new Map();
+  records.forEach((record) => {
+    if (!record.contractNumber) return;
+    const key = `${record.contractNumber}|${record.unidadeGestoraLabel || "--"}`;
+    const current = contracts.get(key) || {
+      key,
+      contractNumber: record.contractNumber,
+      unidadeGestoraLabel: record.unidadeGestoraLabel || "UG não informada",
+      contractStartDate: record.contractStartDate,
+      contractEndDate: record.contractEndDate,
+    };
+    contracts.set(key, current);
+  });
+
+  return [...contracts.values()]
+    .map((item) => {
+      const endDate = parseFlexibleDate(item.contractEndDate);
+      const isActive = Boolean(endDate) && endDate >= today;
+      const isExpiringSoon = Boolean(endDate) && endDate >= today && endDate <= sixMonthsFromNow;
+      return {
+        ...item,
+        isActive,
+        isExpiringSoon,
+      };
+    })
+    .filter((item) => item.isActive || item.contractStartDate || item.contractEndDate)
+    .sort((a, b) => {
+      const dateA = parseFlexibleDate(a.contractEndDate)?.getTime() || Number.MAX_SAFE_INTEGER;
+      const dateB = parseFlexibleDate(b.contractEndDate)?.getTime() || Number.MAX_SAFE_INTEGER;
+      return dateA - dateB;
+    });
+}
+
+function buildComparisonMetaMap({ records, metricKey, startPeriodKey, endPeriodKey, groupKey, ipcaValue }) {
+  if (!startPeriodKey || !endPeriodKey) return new Map();
+
+  const grouped = new Map();
+  records.forEach((record) => {
+    if (![startPeriodKey, endPeriodKey].includes(record.periodKey)) return;
+    const label = record[groupKey] || "Não informado";
+    const current = grouped.get(label) || { startValue: 0, endValue: 0 };
+    if (record.periodKey === startPeriodKey) current.startValue += record[metricKey];
+    if (record.periodKey === endPeriodKey) current.endValue += record[metricKey];
+    grouped.set(label, current);
+  });
+
+  return new Map(
+    [...grouped.entries()].map(([label, values]) => {
+      const variation = getVariationMeta(values.startValue, values.endValue);
+      return [label, {
+        ...values,
+        variationPercent: variation.percent,
+        variationLabel: variation.label,
+        ipcaValue,
+      }];
+    })
+  );
+}
+
+function buildPreLiquidationRows(records) {
+  return getPreLiquidacao(records);
+}
+
+function summarizeDetailedRecords(records) {
+  const grouped = new Map();
+
+  (Array.isArray(records) ? records : []).forEach((record) => {
+    const year = Number(record?.year);
+    const month = Number(record?.month);
+    const elementoCode = String(record?.elementoCode || "").trim();
+    const subelementoCode = String(record?.subelementoCode || "").trim();
+    const unidadeGestoraCode = String(record?.unidadeGestoraCode || "").trim();
+    const periodKey = String(record?.periodKey || "").trim();
+
+    if (!Number.isFinite(year) || !Number.isFinite(month) || !periodKey) return;
+
+    const groupKey = `${year}|${month}|${elementoCode}|${subelementoCode}|${unidadeGestoraCode}`;
+    const current = grouped.get(groupKey) || {
+      year,
+      month,
+      periodKey,
+      monthLabel: periodKey,
+      elementoCode,
+      elementoLabel: record?.elementoLabel || elementoCode,
+      subelementoCode,
+      subelementoLabel: record?.subelementoLabel || subelementoCode,
+      unidadeGestoraCode,
+      unidadeGestoraLabel: record?.unidadeGestoraLabel || unidadeGestoraCode,
+      vlempenhado: 0,
+      vlliquidado: 0,
+      vlpago: 0,
+    };
+
+    current.vlempenhado += Number(record?.vlempenhado) || 0;
+    current.vlliquidado += Number(record?.vlliquidado) || 0;
+    current.vlpago += Number(record?.vlpago) || 0;
+
+    grouped.set(groupKey, current);
+  });
+
+  return [...grouped.values()].map((record) => ({
+    ...record,
+    searchIndex: buildSearchIndex([
+      record.year,
+      record.month,
+      record.periodKey,
+      record.elementoCode,
+      record.elementoLabel,
+      record.subelementoCode,
+      record.subelementoLabel,
+      record.unidadeGestoraCode,
+      record.unidadeGestoraLabel,
+    ]),
+  }));
+}
 
 function aggregateBy(records, key, metricKey, limit = 10, groupOthers = false) {
   const totals = new Map();
@@ -563,13 +1247,15 @@ function aggregateBy(records, key, metricKey, limit = 10, groupOthers = false) {
 }
 
 function buildPieSegments(items, selectedLabels = null, primaryLabel = null) {
-  const total = items.reduce((acc, item) => acc + item.value, 0) || 1;
+  const visibleItems = (items || []).filter((item) => Number(item?.value || 0) > 0);
+  const total = visibleItems.reduce((acc, item) => acc + item.value, 0) || 1;
   let current = 0;
   const colors = ["#5675B7", "#12844C", "#D8313E", "#666666", "#7E90C7", "#3C9C63", "#E8848D", "#B7C6E5"];
 
-  const segments = items.map((item, index) => {
+  const segments = visibleItems.map((item, index) => {
     const start = current;
     const pct = (item.value / total) * 100;
+    if (pct === 0) return null;
     current += pct;
 
     let color = colors[index % colors.length];
@@ -584,11 +1270,11 @@ function buildPieSegments(items, selectedLabels = null, primaryLabel = null) {
       color, // Original color for legend
       range: `${finalColor} ${start.toFixed(2)}% ${current.toFixed(2)}%`,
     };
-  });
+  }).filter(Boolean);
 
   return {
     segments,
-    background: `conic-gradient(${segments.map((segment) => segment.range).join(", ")})`,
+    background: segments.length ? `conic-gradient(${segments.map((segment) => segment.range).join(", ")})` : "none",
     activeSegment: segments.find((segment) => segment.label === primaryLabel) || null,
     highlightedSegments: selectedLabels ? segments.filter((segment) => selectedLabels.has(segment.label)) : [],
     total,
@@ -615,6 +1301,7 @@ function buildDistributionRelations(records, sourceKey, targetKey, metricKey) {
           value,
           pct: total > 0 ? (value / total) * 100 : 0,
         }))
+        .filter((item) => item.pct !== 0)
         .sort((a, b) => b.value - a.value);
 
       return [sourceLabel, { total, items }];
@@ -813,12 +1500,25 @@ function BarList({
   limitHeight = false,
   referenceTotal = null,
   relatedLabels = null,
+  comparisonMetaMap = null,
 }) {
-  const maxValue = items[0]?.value || 1;
+  const safeItems = Array.isArray(items) ? items : [];
+  const maxValue = safeItems[0]?.value || 1;
   const hasCrossSelection = !selectedItem && relatedLabels && relatedLabels.size > 0;
   const effectiveReferenceTotal = Number.isFinite(referenceTotal) && referenceTotal > 0
     ? referenceTotal
-    : items.reduce((acc, item) => acc + item.value, 0);
+    : safeItems.reduce((acc, item) => acc + item.value, 0);
+
+  if (safeItems.length === 0) {
+    return (
+      <section className="bi-panel">
+        <div className="bi-panel-header">
+          <h3>{title}</h3>
+        </div>
+        <div className="empty-state">Sem dados para os filtros selecionados</div>
+      </section>
+    );
+  }
 
   return (
     <section className="bi-panel">
@@ -827,11 +1527,12 @@ function BarList({
       </div>
 
       <div className={`bi-bar-list${limitHeight ? " is-scrollable" : ""}`}>
-        {items.map((item) => {
+        {safeItems.map((item) => {
           const isSelected = selectedItem === item.label;
           const isRelated = relatedLabels?.has(item.label);
           const isDimmed = hasCrossSelection && !isRelated;
           const itemPct = effectiveReferenceTotal > 0 ? (item.value / effectiveReferenceTotal) * 100 : 0;
+          const comparisonMeta = comparisonMetaMap?.get(item.label);
 
           return (
             <div
@@ -843,12 +1544,26 @@ function BarList({
             >
               <div className="bi-bar-copy">
                 <strong>{item.label}</strong>
-                {formatValueAndPercentLine(item.value, itemPct) ? (
-                  <div className="bi-bar-metrics">
-                    {item.value !== 0 ? <span>{fmtCurrency(item.value)}</span> : null}
-                    {itemPct !== 0 ? <small>{fmtPercent(itemPct)}</small> : null}
-                  </div>
-                ) : null}
+                <div className="bi-bar-meta">
+                  {formatValueAndPercentLine(item.value, itemPct) ? (
+                    <div className="bi-bar-metrics">
+                      {item.value !== 0 ? <span>{fmtCurrency(item.value)}</span> : null}
+                      {itemPct !== 0 ? <small>{fmtPercent(itemPct)}</small> : null}
+                    </div>
+                  ) : null}
+                  {comparisonMeta ? (
+                    <div className="bi-bar-comparison">
+                      <small className={comparisonMeta.variationPercent >= 0 ? "positive" : "negative"}>
+                        {comparisonMeta.variationLabel}
+                      </small>
+                      {getIpcaReferenceLabel(comparisonMeta.variationPercent, comparisonMeta.ipcaValue) ? (
+                        <small className="bi-table-subtext">
+                          {getIpcaReferenceLabel(comparisonMeta.variationPercent, comparisonMeta.ipcaValue)}
+                        </small>
+                      ) : null}
+                    </div>
+                  ) : null}
+                </div>
               </div>
               <div className="bi-bar-track">
                 <div className="bi-bar-fill" style={{ width: `${(item.value / maxValue) * 100}%` }} />
@@ -862,8 +1577,20 @@ function BarList({
 }
 
 function TopRankingPanel({ title, items, limit = 10 }) {
-  const displayedItems = items.slice(0, limit);
-  const totalItems = items.totalGroups ?? items.length;
+  const safeItems = Array.isArray(items) ? items : [];
+  const displayedItems = safeItems.slice(0, limit);
+  const totalItems = safeItems.totalGroups ?? safeItems.length;
+
+  if (displayedItems.length === 0) {
+    return (
+      <section className="bi-panel">
+        <div className="bi-panel-header">
+          <h3>{title}</h3>
+        </div>
+        <div className="empty-state">Sem dados para os filtros selecionados</div>
+      </section>
+    );
+  }
 
   return (
     <section className="bi-panel">
@@ -871,7 +1598,7 @@ function TopRankingPanel({ title, items, limit = 10 }) {
         <h3>{title}</h3>
       </div>
 
-      <div className="bi-ranking-list">
+      <div className="bi-ranking-list ranking-scroll">
         {displayedItems.map((item, index) => (
           <article key={item.label} className="bi-ranking-item">
             <span className="bi-ranking-position">{String(index + 1).padStart(2, "0")}</span>
@@ -892,6 +1619,7 @@ function TopRankingPanel({ title, items, limit = 10 }) {
 }
 
 function PiePanel({ title, items, panelKey, hoveredState, onHoverChange, relationInfo, relationTargetLabel }) {
+  const safeItems = Array.isArray(items) ? items : [];
   const safeHoverState = hoveredState && typeof hoveredState === "object" ? hoveredState : null;
   const hoveredLabel = safeHoverState?.source === panelKey ? safeHoverState.label : null;
   const relatedLabels =
@@ -900,11 +1628,23 @@ function PiePanel({ title, items, panelKey, hoveredState, onHoverChange, relatio
       : null;
   const selectedLabels = hoveredLabel ? new Set([hoveredLabel]) : relatedLabels;
   const { segments, background, activeSegment, highlightedSegments } = buildPieSegments(
-    items,
+    safeItems,
     selectedLabels,
     hoveredLabel
   );
   const hasCrossSelection = !hoveredLabel && highlightedSegments.length > 0;
+  const visibleItemCount = segments.length;
+
+  if (segments.length === 0) {
+    return (
+      <section className="bi-panel">
+        <div className="bi-panel-header">
+          <h3>{title}</h3>
+        </div>
+        <div className="empty-state">Sem dados para os filtros selecionados</div>
+      </section>
+    );
+  }
 
   return (
     <section className="bi-panel">
@@ -929,7 +1669,7 @@ function PiePanel({ title, items, panelKey, hoveredState, onHoverChange, relatio
               </>
             ) : (
               <>
-                <strong>{items.length}</strong>
+                <strong>{visibleItemCount}</strong>
                 <span>itens no painel</span>
                 <small>Clique para destacar</small>
               </>
@@ -975,13 +1715,16 @@ function PiePanel({ title, items, panelKey, hoveredState, onHoverChange, relatio
 }
 
 function DistributionRelationshipCard({ hoveredState, relationInfo, relationTargetLabel, othersItems = [], onClear }) {
-  if (hoveredState?.label === "Outras Despesas" && othersItems.length > 0) {
+  const visibleOtherItems = othersItems.filter((item) => Number(item?.value || 0) > 0);
+  const visibleRelationItems = (relationInfo?.items || []).filter((item) => Number(item?.pct || 0) !== 0);
+
+  if (hoveredState?.label === "Outras Despesas" && visibleOtherItems.length > 0) {
     return (
       <section className="bi-panel bi-distribution-relationship-panel">
         <div className="bi-pie-relationship-card">
           <strong>Composição de Outras Despesas</strong>
           <div className="bi-pie-relationship-list">
-            {othersItems.map((item) => (
+            {visibleOtherItems.map((item) => (
               <div key={`distribution-others-${item.label}`} className="bi-pie-relationship-item">
                 <span>{item.label}</span>
                 {item.value !== 0 ? <span>{fmtCurrency(item.value)}</span> : null}
@@ -996,7 +1739,7 @@ function DistributionRelationshipCard({ hoveredState, relationInfo, relationTarg
     );
   }
 
-  if (hoveredState && relationInfo) {
+  if (hoveredState && relationInfo && visibleRelationItems.length > 0) {
     return (
       <section className="bi-panel bi-distribution-relationship-panel">
         <div className="bi-pie-relationship-card">
@@ -1006,7 +1749,7 @@ function DistributionRelationshipCard({ hoveredState, relationInfo, relationTarg
             {relationTargetLabel}
           </strong>
           <div className="bi-pie-relationship-list">
-            {relationInfo.items.map((item) => (
+            {visibleRelationItems.map((item) => (
               <div key={`${hoveredState.label}-${item.label}`} className="bi-pie-relationship-item">
                 <span>{item.label}</span>
                 {formatValueAndPercentLine(item.value, item.pct) ? (
@@ -1474,7 +2217,20 @@ function TopUgTrendLinesPanel({
 }
 
 function AnnualBars({ items, metricLabel }) {
-  const maxValue = Math.max(...items.map((item) => item.value), 1);
+  const safeItems = Array.isArray(items) ? items : [];
+  const maxValue = Math.max(...safeItems.map((item) => item.value), 1);
+
+  if (safeItems.length === 0) {
+    return (
+      <section className="bi-panel">
+        <div className="bi-panel-header">
+          <h3>Série Anual</h3>
+          <span>{metricLabel}</span>
+        </div>
+        <div className="empty-state">Sem dados para os filtros selecionados</div>
+      </section>
+    );
+  }
 
   return (
     <section className="bi-panel">
@@ -1484,7 +2240,7 @@ function AnnualBars({ items, metricLabel }) {
       </div>
 
       <div className="bi-annual-chart">
-        {items.map((item) => (
+        {safeItems.map((item) => (
           <div key={item.year} className="bi-annual-item">
             <span className="bi-annual-value">{fmtCompact(item.value)}</span>
             <div className="bi-annual-column-track">
@@ -1499,7 +2255,20 @@ function AnnualBars({ items, metricLabel }) {
 }
 
 function PeriodBars({ items, metricLabel, title, valueKey = "year" }) {
-  const maxValue = Math.max(...items.map((item) => item.value), 1);
+  const safeItems = Array.isArray(items) ? items : [];
+  const maxValue = Math.max(...safeItems.map((item) => item.value), 1);
+
+  if (safeItems.length === 0) {
+    return (
+      <section className="bi-panel">
+        <div className="bi-panel-header">
+          <h3>{title}</h3>
+          <span>{metricLabel}</span>
+        </div>
+        <div className="empty-state">Sem dados para os filtros selecionados</div>
+      </section>
+    );
+  }
 
   return (
     <section className="bi-panel">
@@ -1509,7 +2278,7 @@ function PeriodBars({ items, metricLabel, title, valueKey = "year" }) {
       </div>
 
       <div className="bi-annual-chart">
-        {items.map((item) => (
+        {safeItems.map((item) => (
           <div key={item[valueKey]} className="bi-annual-item">
             <span className="bi-annual-value">{fmtCompact(item.value)}</span>
             <div className="bi-annual-column-track">
@@ -1531,7 +2300,9 @@ function VariationTable({
   showIPCA = false,
   ipcaAnnual = IPCA_ANUAL_FALLBACK,
   ipcaMonthly = IPCA_MENSAL_FALLBACK,
+  ipcaEstimated = false,
 }) {
+  const [sortBy, setSortBy] = useState("period");
   const getDissonanceEmoji = (color) => {
     if (color === "positive") return "😊";
     if (color === "warning") return "😐";
@@ -1539,8 +2310,9 @@ function VariationTable({
     return "";
   };
 
+  const safeRows = Array.isArray(rows) ? rows : [];
   const withVariation = buildVariationRowsForExport({
-    rows,
+    rows: safeRows,
     valueKey,
     showIPCA,
     ipcaAnnual,
@@ -1555,12 +2327,49 @@ function VariationTable({
 
     return { ...row, dissonanceColor };
   });
+  const sortedRows = useMemo(() => {
+    const items = [...withVariation];
+    if (sortBy === "value") return items.sort((a, b) => b.value - a.value);
+    if (sortBy === "variation") {
+      return items.sort((a, b) => {
+        if (!Number.isFinite(a.variation)) return 1;
+        if (!Number.isFinite(b.variation)) return -1;
+        return b.variation - a.variation;
+      });
+    }
+    return items;
+  }, [sortBy, withVariation]);
   const formatRowLabel = (row) => (valueKey === "period" ? formatPeriodLabel(row[valueKey]) : row[valueKey]);
+
+  if (sortedRows.length === 0) {
+    return (
+      <section className="bi-panel">
+        <div className="bi-panel-header">
+          <div>
+            <h3>{title}</h3>
+            {showIPCA && ipcaEstimated ? <span className="bi-inline-badge warning">IPCA estimado</span> : null}
+          </div>
+        </div>
+        <div className="empty-state">Sem dados para os filtros selecionados</div>
+      </section>
+    );
+  }
 
   return (
     <section className="bi-panel">
       <div className="bi-panel-header">
-        <h3>{title}</h3>
+        <div>
+          <h3>{title}</h3>
+          {showIPCA && ipcaEstimated ? <span className="bi-inline-badge warning">IPCA estimado</span> : null}
+        </div>
+        <div className="bi-table-controls">
+          <label htmlFor={`${title}-sort`}>Ordenar por</label>
+          <select id={`${title}-sort`} value={sortBy} onChange={(e) => setSortBy(e.target.value)}>
+            <option value="period">{periodLabel}</option>
+            <option value="value">Valor final</option>
+            <option value="variation">Variação percentual</option>
+          </select>
+        </div>
       </div>
 
       <div className={`bi-table${showIPCA ? " has-ipca" : ""}`}>
@@ -1570,11 +2379,19 @@ function VariationTable({
           <span>Variação</span>
           {showIPCA && <span>IPCA</span>}
           {showIPCA && <span>Dissonância</span>}
+          {showIPCA && <span>Comparação</span>}
         </div>
-        {withVariation.map((row) => (
+        {sortedRows.map((row) => {
+          const tooltipLabel = [
+            `Empenhado: ${fmtCurrency(row.vlempenhado || row.value || 0)}`,
+            `Liquidado: ${fmtCurrency(row.vlliquidado || 0)}`,
+            `Pago: ${fmtCurrency(row.vlpago || 0)}`,
+          ].join("\n");
+
+          return (
           <div key={row[valueKey]} className="bi-table-row">
             <span>{formatRowLabel(row)}</span>
-            <span>{fmtCurrency(row.value)}</span>
+            <span title={tooltipLabel}>{fmtCurrency(row.value)}</span>
             <span className={row.variation >= 0 ? "positive" : "negative"}>{fmtPercent(row.variation)}</span>
             {showIPCA && (
               <span className="bi-table-subtext">
@@ -1595,8 +2412,13 @@ function VariationTable({
                   : "--"}
               </span>
             )}
+            {showIPCA && (
+              <span className="bi-table-subtext">
+                {Number.isFinite(row.ipcaValue) ? getIpcaReferenceLabel(row.variation, row.ipcaValue) : null}
+              </span>
+            )}
           </div>
-        ))}
+        )})}
       </div>
     </section>
   );
@@ -1670,6 +2492,19 @@ function MatrixPanel({ title, rows, years, matrixSearch, onMatrixSearch }) {
 }
 
 function InsightCards({ title = "Informações de Destaque", cards }) {
+  const safeCards = Array.isArray(cards) ? cards.filter(Boolean) : [];
+
+  if (safeCards.length === 0) {
+    return (
+      <section className="bi-panel">
+        <div className="bi-panel-header">
+          <h3>{title}</h3>
+        </div>
+        <div className="empty-state">Sem dados para os filtros selecionados</div>
+      </section>
+    );
+  }
+
   return (
     <section className="bi-panel">
       <div className="bi-panel-header">
@@ -1677,7 +2512,7 @@ function InsightCards({ title = "Informações de Destaque", cards }) {
       </div>
 
       <div className="bi-insights">
-        {cards.map((card) => (
+        {safeCards.map((card) => (
           <article key={card.label}>
             <strong>{card.value}</strong>
             <span>{card.label}</span>
@@ -1745,10 +2580,18 @@ function MultiSelectChecklist({
   emptySelectionLabel = "Selecionar opções",
   className = "",
 }) {
+  const safeOptions = Array.isArray(options) ? options : [];
+  const safeSelectedValues = Array.isArray(selectedValues) ? selectedValues : [];
   const [isOpen, setIsOpen] = useState(false);
   const deferredSearchValue = useDeferredValue(searchValue);
-  const filteredOptions = options.filter((option) => normalize(option.label).includes(normalize(deferredSearchValue)));
-  const selectedLabels = options.filter((option) => selectedValues.includes(option.value)).map((option) => option.label);
+  const filteredOptions = useMemo(
+    () => safeOptions.filter((option) => normalize(option.label).includes(normalize(deferredSearchValue))),
+    [deferredSearchValue, safeOptions]
+  );
+  const selectedLabels = useMemo(
+    () => safeOptions.filter((option) => safeSelectedValues.includes(option.value)).map((option) => option.label),
+    [safeOptions, safeSelectedValues]
+  );
 
   return (
     <div className={`bi-filter-group ${className}`}>
@@ -1770,8 +2613,8 @@ function MultiSelectChecklist({
               onChange={(e) => onSearchChange(e.target.value)}
             />
             <div className="bi-selection-summary">
-              {selectedValues.length > 0 ? `${selectedValues.length} selecionado(s)` : "Nenhum selecionado"}
-              {selectedValues.length > 0 ? (
+              {safeSelectedValues.length > 0 ? `${safeSelectedValues.length} selecionado(s)` : "Nenhum selecionado"}
+              {safeSelectedValues.length > 0 ? (
                 <button type="button" className="bi-inline-clear" onClick={onClear}>
                   Limpar
                 </button>
@@ -1779,7 +2622,7 @@ function MultiSelectChecklist({
             </div>
             <div className="bi-checkbox-list">
               {filteredOptions.map((option) => {
-                const checked = selectedValues.includes(option.value);
+                const checked = safeSelectedValues.includes(option.value);
                 return (
                   <label key={option.value} className={`bi-checkbox-item${checked ? " is-selected" : ""}`}>
                     <input type="checkbox" checked={checked} onChange={() => onToggleValue(option.value)} />
@@ -1928,11 +2771,52 @@ function buildHistoricalAverageRows({ records, metricKey, endPeriodKey, grouping
     });
 }
 
-function AlertTable({ title, rows, baseLabel, compareLabel, emptyMessage, totalValue = 0 }) {
+const AlertTableRow = memo(function AlertTableRow({ row, totalValue = 0 }) {
+  const compareVal = row.endValue ?? row.currentValue;
+  const impact = totalValue > 0 ? (compareVal / totalValue) * 100 : 0;
+  const isCritical = row.variationPercent > 50 || !Number.isFinite(row.variationPercent);
+  const isHigh = row.variationPercent > 25;
+
+  return (
+    <div className={`bi-alert-row${row.exceededThreshold ? " is-alert" : ""}${isCritical ? " is-critical" : ""}`}>
+      <div className="bi-alert-category">
+        {row.exceededThreshold && (
+          <span className={`bi-alert-badge ${isCritical ? "critical" : isHigh ? "high" : "warning"}`}>
+            {isCritical ? "Crítico" : isHigh ? "Alto" : "Atenção"}
+          </span>
+        )}
+        <strong>{row.label}</strong>
+      </div>
+      <span>{fmtCurrency(row.startValue ?? row.averageValue)}</span>
+      <span>{fmtCurrency(compareVal)}</span>
+      <span
+        className={`bi-alert-trend ${
+          Number.isFinite(row.variationPercent) ? (row.variationPercent >= 0 ? "positive" : "negative") : "positive"
+        }`}
+      >
+        {row.variationPercent >= 0 ? "📈" : "📉"} {row.variationLabel}
+      </span>
+      <span className="bi-alert-impact">{impact.toFixed(1)}% do total</span>
+      <span>{fmtCurrency(row.deltaValue)}</span>
+    </div>
+  );
+});
+
+const AlertTable = memo(function AlertTable({ title, rows, baseLabel, compareLabel, emptyMessage, totalValue = 0 }) {
   const alertsCount = rows.filter((r) => r.exceededThreshold).length;
   const avgVariation = rows.length > 0
     ? rows.reduce((acc, r) => acc + (Number.isFinite(r.variationPercent) ? r.variationPercent : 0), 0) / rows.length
     : 0;
+  const renderAlertRow = useCallback(
+    (row) => (
+      <AlertTableRow
+        key={row.label}
+        row={row}
+        totalValue={totalValue}
+      />
+    ),
+    [totalValue]
+  );
 
   return (
     <section className="bi-panel">
@@ -1959,40 +2843,446 @@ function AlertTable({ title, rows, baseLabel, compareLabel, emptyMessage, totalV
             <span>Impacto</span>
             <span>Diferença</span>
           </div>
-          {rows.map((row) => {
-            const compareVal = row.endValue ?? row.currentValue;
-            const impact = totalValue > 0 ? (compareVal / totalValue) * 100 : 0;
-            const isCritical = row.variationPercent > 50 || !Number.isFinite(row.variationPercent);
-            const isHigh = row.variationPercent > 25;
-
-            return (
-              <div key={row.label} className={`bi-alert-row${row.exceededThreshold ? " is-alert" : ""}${isCritical ? " is-critical" : ""}`}>
-                <div className="bi-alert-category">
-                  {row.exceededThreshold && (
-                    <span className={`bi-alert-badge ${isCritical ? "critical" : isHigh ? "high" : "warning"}`}>
-                      {isCritical ? "Crítico" : isHigh ? "Alto" : "Atenção"}
-                    </span>
-                  )}
-                  <strong>{row.label}</strong>
-                </div>
-                <span>{fmtCurrency(row.startValue ?? row.averageValue)}</span>
-                <span>{fmtCurrency(compareVal)}</span>
-                <span
-                  className={`bi-alert-trend ${
-                    Number.isFinite(row.variationPercent) ? (row.variationPercent >= 0 ? "positive" : "negative") : "positive"
-                  }`}
-                >
-                  {row.variationPercent >= 0 ? "📈" : "📉"} {row.variationLabel}
-                </span>
-                <span className="bi-alert-impact">{impact.toFixed(1)}% do total</span>
-                <span>{fmtCurrency(row.deltaValue)}</span>
-              </div>
-            );
-          })}
+          <VirtualizedAlertRows rows={rows} renderRow={renderAlertRow} />
         </div>
       ) : (
         <div className="empty-state">{emptyMessage}</div>
       )}
+    </section>
+  );
+});
+
+function DetailedDataStatus({ title, hasDetailedData, emptyMessage }) {
+  return (
+    <section className="bi-panel">
+      <div className="bi-panel-header">
+        <h3>{title}</h3>
+        <span>{hasDetailedData ? "Base detalhada aplicada" : "Aguardando base detalhada do portal"}</span>
+      </div>
+
+      <div className="bi-narrative">
+        {hasDetailedData ? (
+          <p>{emptyMessage}</p>
+        ) : (
+          <>
+            <p>
+              A base atual do painel continua agregada por ano, mês, elemento, subelemento e UG. Para esta trilha,
+              o portal precisa expor também campos detalhados como credor, datas de liquidação/pagamento,
+              classificação, objeto do contrato e modalidade de licitação.
+            </p>
+            <p>
+              A interface desta aba já está preparada para consumir essa base assim que ela passar a ser publicada em
+              `dataset.detailedFacts`.
+            </p>
+          </>
+        )}
+      </div>
+    </section>
+  );
+}
+
+const VirtualTableRows = memo(function VirtualTableRows({
+  rows,
+  rowComponent,
+  rowHeight,
+  viewportHeight = VIRTUAL_TABLE_VIEWPORT_HEIGHT,
+}) {
+  if (!rows.length) return null;
+
+  return (
+    <div className="bi-virtual-list-shell">
+      <VirtualList
+        className="bi-react-window-list"
+        defaultHeight={viewportHeight}
+        overscanCount={6}
+        rowComponent={rowComponent}
+        rowCount={rows.length}
+        rowHeight={rowHeight}
+        rowProps={{ rows }}
+        style={{ height: viewportHeight }}
+      />
+    </div>
+  );
+});
+
+const ConcentrationTableRow = memo(function ConcentrationTableRow({ index, rows, style }) {
+  const row = rows[index];
+  if (!row) return null;
+
+  return (
+    <div style={style} className="bi-virtual-list-item">
+      <div key={row.key} className="bi-alert-row bi-alert-row-concentration">
+        <div className="bi-alert-category">
+          <strong>{row.ugDescricao}</strong>
+          <span className="bi-alert-impact">{row.subelementoDescricao}</span>
+        </div>
+        <span>{row.ug || "--"}</span>
+        <span>{row.subelemento || "--"}</span>
+        <span>{fmtCurrency(row.empenhado)}</span>
+        <span>{fmtCurrency(row.liquidado)}</span>
+        <span>{fmtCurrency(row.pago)}</span>
+      </div>
+    </div>
+  );
+});
+
+const PreLiquidationTableRow = memo(function PreLiquidationTableRow({ index, rows, style }) {
+  const row = rows[index];
+  if (!row) return null;
+
+  return (
+    <div style={style} className="bi-virtual-list-item">
+      <div key={row.id} className="bi-alert-row bi-alert-row-preliquidation is-alert">
+        <div className="bi-alert-category">
+          <span className="bi-alert-badge warning">Atenção</span>
+          <strong>{row.unidadeGestoraLabel || "UG não informada"}</strong>
+          <span className="bi-alert-impact">{row.subelementoLabel || "Subelemento não informado"}</span>
+        </div>
+        <span className="bi-cell-stack">
+          <small>Empenho: {row.empenhoNumber || "--"}</small>
+          <small>OB: {row.ordemBancariaNumber || "--"}</small>
+        </span>
+        <span className="bi-preliquidation-creditor">{row.creditorLabel || "Não informado"}</span>
+        <span className="bi-cell-stack">
+          <small className="bi-cell-label">Pagamento</small>
+          <strong>{formatDetailedDate(row.paymentDate)}</strong>
+        </span>
+        <span className="bi-cell-stack">
+          <small className="bi-cell-label">Liquidação</small>
+          <strong>{formatDetailedDate(row.liquidationDate)}</strong>
+        </span>
+        <span className="bi-cell-stack">
+          <small className="bi-cell-label">Valor Pago</small>
+          <strong>{fmtCurrency(row.vlpago || row.value)}</strong>
+        </span>
+      </div>
+    </div>
+  );
+});
+
+const CreditorConcentrationTable = memo(function CreditorConcentrationTable({ rows }) {
+  if (rows.length === 0) {
+    return (
+      <section className="bi-panel">
+        <div className="bi-panel-header">
+          <h3>Concentração por UG e subelemento</h3>
+          <span>Sem dados para os filtros selecionados</span>
+        </div>
+        <div className="empty-state">Sem dados para os filtros selecionados</div>
+      </section>
+    );
+  }
+
+  return (
+    <section className="bi-panel">
+      <div className="bi-panel-header">
+        <div>
+          <h3>Concentração por UG e subelemento</h3>
+          <div className="bi-alert-summary-mini">
+            <span>{rows.length} combinações únicas analisadas</span>
+            <span>•</span>
+            <span>Valores consolidados no período ativo</span>
+          </div>
+        </div>
+      </div>
+
+      <div className="bi-alert-table">
+        <div className="bi-alert-row bi-alert-head bi-alert-row-concentration">
+          <span>UG / Subelemento</span>
+          <span>UG</span>
+          <span>Subelemento</span>
+          <span>Empenhado</span>
+          <span>Liquidado</span>
+          <span>Pago</span>
+        </div>
+        <VirtualTableRows
+          rows={rows}
+          rowComponent={ConcentrationTableRow}
+          rowHeight={VIRTUAL_CONCENTRATION_ROW_HEIGHT}
+        />
+      </div>
+    </section>
+  );
+});
+
+const PreLiquidationPaymentTable = memo(function PreLiquidationPaymentTable({ rows, hasDetailedData }) {
+  if (!hasDetailedData) {
+    return (
+      <DetailedDataStatus
+        title="Pagamentos Antes da Liquidação"
+        hasDetailedData={hasDetailedData}
+        emptyMessage="Nenhum pagamento fora da ordem esperada foi encontrado para o recorte selecionado."
+      />
+    );
+  }
+
+  if (rows.length === 0) {
+    return (
+      <section className="bi-panel">
+        <div className="bi-panel-header">
+          <h3>Pagamentos com liquidação posterior ou ausente</h3>
+          <span>Sem dados para os filtros selecionados</span>
+        </div>
+        <div className="empty-state">Sem dados para os filtros selecionados</div>
+      </section>
+    );
+  }
+
+  return (
+    <section className="bi-panel">
+      <div className="bi-panel-header">
+        <div>
+          <h3>Pagamentos com liquidação posterior ou ausente</h3>
+          <div className="bi-alert-summary-mini">
+            <span>{rows.length} registros localizados</span>
+            <span>•</span>
+            <span>Ordenado por valor pago</span>
+          </div>
+        </div>
+      </div>
+
+      <div className="bi-alert-table">
+        <div className="bi-alert-row bi-alert-head bi-alert-row-preliquidation">
+          <span>UG / Subelemento</span>
+          <span>Empenho / OB</span>
+          <span>Credor</span>
+          <span>Pagamento</span>
+          <span>Liquidação</span>
+          <span>Valor Pago</span>
+        </div>
+        <VirtualTableRows
+          rows={rows}
+          rowComponent={PreLiquidationTableRow}
+          rowHeight={VIRTUAL_PRELIQUIDATION_ROW_HEIGHT}
+        />
+      </div>
+    </section>
+  );
+});
+
+function MissingContractTable({ rows, hasDetailedData }) {
+  if (!hasDetailedData || rows.length === 0) {
+    return (
+      <DetailedDataStatus
+        title="Despesas sem Contrato"
+        hasDetailedData={hasDetailedData}
+        emptyMessage="Nenhuma despesa sem contrato foi encontrada para o recorte selecionado."
+      />
+    );
+  }
+
+  return (
+    <section className="bi-panel">
+      <div className="bi-panel-header">
+        <h3>Despesas sem contrato ou instrumento legal</h3>
+        <span>Suprimento de fundos excluído</span>
+      </div>
+      <div className="bi-alert-table">
+        <div className="bi-alert-row bi-alert-head bi-alert-row-contractless">
+          <span>UG / Subelemento</span>
+          <span>Empenhado</span>
+          <span>Liquidado</span>
+          <span>Pago</span>
+        </div>
+        <ProgressiveRows
+          rows={rows}
+          initialCount={30}
+          renderRow={(row) => (
+            <div key={row.id} className="bi-alert-row bi-alert-row-contractless is-alert">
+              <div className="bi-alert-category">
+                <span className="bi-alert-badge warning">Sem contrato</span>
+                <strong>{row.unidadeGestoraLabel || "UG não informada"}</strong>
+                <span className="bi-alert-impact">{row.subelementoLabel || "Subelemento não informado"}</span>
+              </div>
+              <span>{fmtCurrency(row.vlempenhado)}</span>
+              <span>{fmtCurrency(row.vlliquidado)}</span>
+              <span>{fmtCurrency(row.vlpago)}</span>
+            </div>
+          )}
+        />
+      </div>
+    </section>
+  );
+}
+
+function ItemServiceTable({ rows, hasDetailedData, metricLabel }) {
+  if (!hasDetailedData || rows.length === 0) {
+    return (
+      <DetailedDataStatus
+        title="Despesas por Item/Serviço"
+        hasDetailedData={hasDetailedData}
+        emptyMessage="Dados não disponíveis para esta análise."
+      />
+    );
+  }
+
+  return (
+    <section className="bi-panel">
+      <div className="bi-panel-header">
+        <h3>Itens e serviços adquiridos</h3>
+        <span>{metricLabel}</span>
+      </div>
+      <div className="bi-alert-table">
+        <div className="bi-alert-row bi-alert-head bi-alert-row-item">
+          <span>Descrição</span>
+          <span>Quantidade</span>
+          <span>Valor Unitário</span>
+          <span>Valor Total</span>
+          <span>UG</span>
+        </div>
+        <div className="ranking-scroll">
+          <ProgressiveRows
+            rows={rows}
+            initialCount={30}
+            renderRow={(row) => (
+              <div key={row.key} className="bi-alert-row bi-alert-row-item">
+                <div className="bi-alert-category">
+                  <strong>{row.description}</strong>
+                  <span className="bi-alert-impact">{row.classification}</span>
+                  {row.contractObject && row.contractObject !== "--" ? <span className="bi-alert-impact">{row.contractObject}</span> : null}
+                </div>
+                <span>{row.quantity > 0 ? new Intl.NumberFormat("pt-BR").format(row.quantity) : "--"}</span>
+                <span>{Number(row.unitValue) > 0 ? fmtCurrency(row.unitValue) : "--"}</span>
+                <span>{fmtCurrency(row.totalValue)}</span>
+                <span>{row.unidadeGestoraLabel}</span>
+              </div>
+            )}
+          />
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function ItemVariationTable({ rows, hasDetailedData, startPeriodKey, endPeriodKey }) {
+  if (!hasDetailedData || rows.length === 0) {
+    return (
+      <DetailedDataStatus
+        title="Variação por Item/Serviço"
+        hasDetailedData={hasDetailedData}
+        emptyMessage="Dados não disponíveis para esta análise."
+      />
+    );
+  }
+
+  return (
+    <section className="bi-panel">
+      <div className="bi-panel-header">
+        <div>
+          <h3>Variação por item/serviço</h3>
+          <div className="bi-alert-summary-mini">
+            <span>{startPeriodKey || "--"} → {endPeriodKey || "--"}</span>
+          </div>
+        </div>
+      </div>
+      <div className="bi-alert-table">
+        <div className="bi-alert-row bi-alert-head bi-alert-row-item-variation">
+          <span>Descrição</span>
+          <span>Valor Inicial</span>
+          <span>Valor Final</span>
+          <span>Variação</span>
+          <span>IPCA</span>
+          <span>Comparação</span>
+        </div>
+        <ProgressiveRows
+          rows={rows}
+          initialCount={30}
+          renderRow={(row) => (
+            <div key={row.key} className="bi-alert-row bi-alert-row-item-variation">
+              <div className="bi-alert-category">
+                <strong>{row.description}</strong>
+                <span className="bi-alert-impact">{row.unidadeGestoraLabel}</span>
+              </div>
+              <span>{fmtCurrency(row.startValue)}</span>
+              <span>{fmtCurrency(row.endValue)}</span>
+              <span className={row.variationPercent >= 0 ? "positive" : "negative"}>{row.variationLabel}</span>
+              <span>{Number.isFinite(row.ipcaValue) ? `${row.ipcaValue.toFixed(2)}%` : "--"}</span>
+              <span>{Number.isFinite(row.ipcaValue) ? getIpcaReferenceLabel(row.variationPercent, row.ipcaValue) : null}</span>
+            </div>
+          )}
+        />
+      </div>
+    </section>
+  );
+}
+
+function ProcurementModeTable({ rows, hasDetailedData }) {
+  if (!hasDetailedData || rows.length === 0) {
+    return (
+      <DetailedDataStatus
+        title="Despesas por Modalidade"
+        hasDetailedData={hasDetailedData}
+        emptyMessage="Dados não disponíveis para esta análise."
+      />
+    );
+  }
+
+  return (
+    <section className="bi-panel">
+      <div className="bi-panel-header">
+        <h3>Despesas por modalidade</h3>
+      </div>
+      <div className="bi-alert-table">
+        <div className="bi-alert-row bi-alert-head bi-alert-row-mode">
+          <span>Categoria</span>
+          <span>Modalidade</span>
+          <span>Total</span>
+        </div>
+        <ProgressiveRows
+          rows={rows}
+          renderRow={(row) => (
+            <div key={row.key} className="bi-alert-row bi-alert-row-mode">
+              <span>{row.category}</span>
+              <span>{row.mode}</span>
+              <span>{fmtCurrency(row.totalValue)}</span>
+            </div>
+          )}
+        />
+      </div>
+    </section>
+  );
+}
+
+function ContractsTable({ rows, hasDetailedData }) {
+  if (!hasDetailedData || rows.length === 0) {
+    return (
+      <DetailedDataStatus
+        title="Contratos e Vigências"
+        hasDetailedData={hasDetailedData}
+        emptyMessage="Dados não disponíveis para esta análise."
+      />
+    );
+  }
+
+  return (
+    <section className="bi-panel">
+      <div className="bi-panel-header">
+        <h3>Contratos vigentes</h3>
+        <span>Destaque para vigências inferiores a 6 meses</span>
+      </div>
+      <div className="bi-alert-table">
+        <div className="bi-alert-row bi-alert-head bi-alert-row-contracts">
+          <span>Contrato</span>
+          <span>UG</span>
+          <span>Início</span>
+          <span>Fim</span>
+        </div>
+        <ProgressiveRows
+          rows={rows}
+          initialCount={30}
+          renderRow={(row) => (
+            <div key={row.key} className={`bi-alert-row bi-alert-row-contracts${row.isExpiringSoon ? " is-alert" : ""}`}>
+              <div className="bi-alert-category">
+                {row.isExpiringSoon ? <span className="bi-alert-badge warning">Vencendo</span> : null}
+                <strong>{row.contractNumber}</strong>
+              </div>
+              <span>{row.unidadeGestoraLabel}</span>
+              <span>{formatDetailedDate(row.contractStartDate)}</span>
+              <span>{formatDetailedDate(row.contractEndDate)}</span>
+            </div>
+          )}
+        />
+      </div>
     </section>
   );
 }
@@ -2038,6 +3328,13 @@ export default function CusteioDashboard() {
   const alertsInsightsExportRef = useRef(null);
   const alertsPeriodExportRef = useRef(null);
   const alertsHistoricalExportRef = useRef(null);
+  const creditorConcentrationExportRef = useRef(null);
+  const withoutContractExportRef = useRef(null);
+  const preLiquidationExportRef = useRef(null);
+  const itemServicesExportRef = useRef(null);
+  const itemVariationExportRef = useRef(null);
+  const procurementModesExportRef = useRef(null);
+  const contractsExportRef = useRef(null);
   const fixedPeriodStartInput = "01/01/2021";
   const currentDateInput = new Intl.DateTimeFormat("pt-BR", {
     timeZone: "America/Sao_Paulo",
@@ -2072,6 +3369,8 @@ export default function CusteioDashboard() {
   const [elementoSearch, setElementoSearch] = useState("");
   const [subelementoSearch, setSubelementoSearch] = useState("");
   const [unidadeSearch, setUnidadeSearch] = useState("");
+  const [procurementModeSearch, setProcurementModeSearch] = useState("");
+  const [selectedProcurementModes, setSelectedProcurementModes] = useState([]);
   const [exportingKey, setExportingKey] = useState(null);
   const deferredMatrixSearch = useDeferredValue(matrixSearch);
 
@@ -2221,7 +3520,12 @@ export default function CusteioDashboard() {
       };
     }
 
-    const relevantFacts = dataset.facts.filter(([, , , subelementoCode]) =>
+    const datasetFacts = Array.isArray(dataset?.facts) ? dataset.facts : [];
+    const datasetElementos = Array.isArray(dataset?.elementos) ? dataset.elementos : [];
+    const datasetSubelementos = Array.isArray(dataset?.subelementos) ? dataset.subelementos : [];
+    const datasetUnidades = Array.isArray(dataset?.unidades) ? dataset.unidades : [];
+
+    const relevantFacts = datasetFacts.filter(([, , , subelementoCode]) =>
       String(subelementoCode || "").startsWith(CUSTEIO_SUBELEMENTO_PREFIX)
     );
     const relevantElementCodes = new Set(relevantFacts.map(([, , elementoCode]) => String(elementoCode)));
@@ -2230,17 +3534,17 @@ export default function CusteioDashboard() {
 
     return {
       elementos: new Map(
-        dataset.elementos
+        datasetElementos
           .filter((item) => relevantElementCodes.has(String(item.code)))
           .map((item) => [item.code, item])
       ),
       subelementos: new Map(
-        dataset.subelementos
+        datasetSubelementos
           .filter((item) => relevantSubelementCodes.has(String(item.code)))
           .map((item) => [item.code, item])
       ),
       unidades: new Map(
-        dataset.unidades
+        datasetUnidades
           .filter((item) => relevantUnidadeCodes.has(String(item.code)))
           .map((item) => [item.code, item])
       ),
@@ -2249,14 +3553,18 @@ export default function CusteioDashboard() {
 
   const records = useMemo(() => {
     if (!dataset) return [];
+    const datasetFacts = Array.isArray(dataset?.facts) ? dataset.facts : [];
 
-    return dataset.facts
+    return datasetFacts
       .filter(([, , , subelementoCode]) => String(subelementoCode || "").startsWith(CUSTEIO_SUBELEMENTO_PREFIX))
       .map(([year, month, elementoCode, subelementoCode, unidadeCode, vlempenhado, vlliquidado, vlpago]) => {
         const elemento = dimensionLookup.elementos.get(elementoCode);
         const subelemento = dimensionLookup.subelementos.get(subelementoCode);
         const unidade = dimensionLookup.unidades.get(unidadeCode);
         const periodKey = `${year}-${String(month).padStart(2, "0")}`;
+        const elementoLabel = elemento?.label || elementoCode;
+        const subelementoLabel = subelemento?.label || subelementoCode;
+        const unidadeGestoraLabel = unidade?.label || unidadeCode;
 
         return {
           year,
@@ -2264,14 +3572,25 @@ export default function CusteioDashboard() {
           periodKey,
           monthLabel: dataset.periodLabels?.[periodKey] || periodKey,
           elementoCode,
-          elementoLabel: elemento?.label || elementoCode,
+          elementoLabel,
           subelementoCode,
-          subelementoLabel: subelemento?.label || subelementoCode,
+          subelementoLabel,
           unidadeGestoraCode: unidadeCode,
-          unidadeGestoraLabel: unidade?.label || unidadeCode,
+          unidadeGestoraLabel,
           vlempenhado,
           vlliquidado,
           vlpago,
+          searchIndex: buildSearchIndex([
+            year,
+            month,
+            periodKey,
+            elementoCode,
+            elementoLabel,
+            subelementoCode,
+            subelementoLabel,
+            unidadeCode,
+            unidadeGestoraLabel,
+          ]),
         };
       });
   }, [dataset, dimensionLookup]);
@@ -2291,6 +3610,16 @@ export default function CusteioDashboard() {
     [selectedPeriodEndInput]
   );
 
+  const effectiveAlertStartPeriod = useMemo(
+    () => (selectedPeriodStart === "all" ? null : selectedPeriodStart),
+    [selectedPeriodStart]
+  );
+
+  const effectiveAlertEndPeriod = useMemo(
+    () => (selectedPeriodEnd === "all" ? null : selectedPeriodEnd),
+    [selectedPeriodEnd]
+  );
+
   const dimensionOptions = useMemo(() => {
     if (!dataset) return { elementos: [], subelementos: [], unidades: [] };
 
@@ -2301,37 +3630,183 @@ export default function CusteioDashboard() {
     };
   }, [dataset, dimensionLookup]);
 
-  const historyScopedRecords = useMemo(() => {
-    if (!records.length) return [];
+  const detailedRecords = useMemo(() => extractDetailedRecords(dataset), [dataset]);
+
+  const procurementModeOptions = useMemo(() => {
+    const datasetOptions = Array.isArray(dataset?.procurementModeOptions)
+      ? dataset.procurementModeOptions
+          .map((item) => {
+            if (typeof item === "string") {
+              return {
+                value: normalizeProcurementModeValue(item),
+                label: item,
+              };
+            }
+
+            const label = String(item?.label || item?.name || item?.value || "").trim();
+            if (!label) return null;
+
+            return {
+              value: normalizeProcurementModeValue(item?.value || label),
+              label,
+            };
+          })
+          .filter(Boolean)
+      : [];
+
+    if (datasetOptions.length > 0) return datasetOptions;
+
+    const recordOptions = [...new Set(detailedRecords.map((record) => record.procurementMode).filter(Boolean))]
+      .map((label) => ({
+        value: normalizeProcurementModeValue(label),
+        label,
+      }));
+
+    return recordOptions.length > 0 ? recordOptions : [];
+  }, [dataset, detailedRecords]);
+
+  const activeFilters = useMemo(
+    () => ({
+      selectedYear,
+      periodStart: selectedPeriodStart,
+      periodEnd: selectedPeriodEnd,
+      selectedElementos,
+      selectedSubelementos,
+      selectedUnidades,
+      selectedProcurementModes,
+    }),
+    [
+      selectedElementos,
+      selectedPeriodEnd,
+      selectedPeriodStart,
+      selectedProcurementModes,
+      selectedSubelementos,
+      selectedUnidades,
+      selectedYear,
+    ]
+  );
+
+  const textSearchMatches = useMemo(
+    () => searchByText(detailedRecords, appliedSearch),
+    [appliedSearch, detailedRecords]
+  );
+
+  const textSearchMatchKeys = useMemo(
+    () => new Set(textSearchMatches.map((item) => item.key)),
+    [textSearchMatches]
+  );
+
+  const textSearchMatchedUgCodes = useMemo(
+    () => new Set(textSearchMatches.map((item) => String(item.ug || "").trim()).filter(Boolean)),
+    [textSearchMatches]
+  );
+
+  const filteredDetailedRecords = useMemo(() => {
+    if (!detailedRecords.length) return [];
     const searchText = normalize(appliedSearch);
 
-    return records.filter((record) => {
+    return detailedRecords.filter((record) => {
+      const yearOk = activeFilters.selectedYear === "all" || record.year === Number(activeFilters.selectedYear);
+      const elementoOk =
+        activeFilters.selectedElementos.length === 0 || activeFilters.selectedElementos.includes(record.elementoCode);
+      const subelementoOk =
+        activeFilters.selectedSubelementos.length === 0
+        || activeFilters.selectedSubelementos.includes(record.subelementoCode);
+      const unidadeOk =
+        activeFilters.selectedUnidades.length === 0 || activeFilters.selectedUnidades.includes(record.unidadeGestoraCode);
+      const procurementOk =
+        activeFilters.selectedProcurementModes.length === 0
+        || activeFilters.selectedProcurementModes.includes(record.procurementModeValue);
+      const periodStartOk =
+        activeFilters.periodStart === "all" || !record.periodKey || record.periodKey >= activeFilters.periodStart;
+      const periodEndOk =
+        activeFilters.periodEnd === "all" || !record.periodKey || record.periodKey <= activeFilters.periodEnd;
+      const searchOk = !searchText || matchesSearchQuery(record.searchIndex, searchText);
+
+      return yearOk && elementoOk && subelementoOk && unidadeOk && procurementOk && periodStartOk && periodEndOk && searchOk;
+    });
+  }, [activeFilters, appliedSearch, detailedRecords]);
+
+  const procurementHistoryScopedRecords = useMemo(() => {
+    if (!detailedRecords.length) return [];
+    const searchText = normalize(appliedSearch);
+
+    return detailedRecords.filter((record) => {
+      const yearOk = selectedYear === "all" || record.year === Number(selectedYear);
+      const elementoOk = selectedElementos.length === 0 || selectedElementos.includes(record.elementoCode);
+      const subelementoOk =
+        selectedSubelementos.length === 0 || selectedSubelementos.includes(record.subelementoCode);
+      const unidadeOk = selectedUnidades.length === 0 || selectedUnidades.includes(record.unidadeGestoraCode);
+      const procurementOk =
+        selectedProcurementModes.length === 0
+        || selectedProcurementModes.includes(record.procurementModeValue);
+      const searchOk =
+        !searchText
+        || matchesSearchQuery(record.searchIndex, searchText)
+        || textSearchMatchKeys.has(buildUgSubelementoLookupKey(record))
+        || textSearchMatchedUgCodes.has(String(record.unidadeGestoraCode || "").trim());
+
+      return yearOk && elementoOk && subelementoOk && unidadeOk && procurementOk && searchOk;
+    });
+  }, [
+    appliedSearch,
+    detailedRecords,
+    selectedElementos,
+    selectedProcurementModes,
+    selectedSubelementos,
+    selectedUnidades,
+    selectedYear,
+    textSearchMatchKeys,
+    textSearchMatchedUgCodes,
+  ]);
+
+  const recordsForVisibleTabs = useMemo(
+    () => (selectedProcurementModes.length > 0 ? summarizeDetailedRecords(filteredDetailedRecords) : records),
+    [filteredDetailedRecords, records, selectedProcurementModes.length]
+  );
+
+  const recordsForHistoryTabs = useMemo(
+    () => (
+      selectedProcurementModes.length > 0
+        ? summarizeDetailedRecords(procurementHistoryScopedRecords)
+        : records
+    ),
+    [procurementHistoryScopedRecords, records, selectedProcurementModes.length]
+  );
+
+  const historyScopedRecords = useMemo(() => {
+    if (!recordsForHistoryTabs.length) return [];
+    const searchText = normalize(appliedSearch);
+
+    return recordsForHistoryTabs.filter((record) => {
       const yearOk = selectedYear === "all" || record.year === Number(selectedYear);
       const elementoOk = selectedElementos.length === 0 || selectedElementos.includes(record.elementoCode);
       const subelementoOk = selectedSubelementos.length === 0 || selectedSubelementos.includes(record.subelementoCode);
       const unidadeOk = selectedUnidades.length === 0 || selectedUnidades.includes(record.unidadeGestoraCode);
       const searchOk =
-        !searchText ||
-        [record.elementoLabel, record.subelementoLabel, record.unidadeGestoraLabel, record.periodKey, record.year]
-          .map((item) => normalize(item))
-          .some((item) => item.includes(searchText));
+        !searchText
+        || matchesSearchQuery(record.searchIndex, searchText)
+        || textSearchMatchKeys.has(buildUgSubelementoLookupKey(record))
+        || textSearchMatchedUgCodes.has(String(record.unidadeGestoraCode || "").trim());
 
       return yearOk && elementoOk && subelementoOk && unidadeOk && searchOk;
     });
   }, [
     appliedSearch,
-    records,
+    recordsForHistoryTabs,
     selectedElementos,
     selectedSubelementos,
     selectedUnidades,
     selectedYear,
+    textSearchMatchKeys,
+    textSearchMatchedUgCodes,
   ]);
 
   const visibleRecords = useMemo(() => {
-    if (!records.length) return [];
+    if (!recordsForVisibleTabs.length) return [];
     const searchText = normalize(appliedSearch);
 
-    return records.filter((record) => {
+    return recordsForVisibleTabs.filter((record) => {
       const yearOk = selectedYear === "all" || record.year === Number(selectedYear);
       const elementoOk = selectedElementos.length === 0 || selectedElementos.includes(record.elementoCode);
       const subelementoOk =
@@ -2340,23 +3815,79 @@ export default function CusteioDashboard() {
       const periodStartOk = selectedPeriodStart === "all" || record.periodKey >= selectedPeriodStart;
       const periodEndOk = selectedPeriodEnd === "all" || record.periodKey <= selectedPeriodEnd;
       const searchOk =
-        !searchText ||
-        [record.elementoLabel, record.subelementoLabel, record.unidadeGestoraLabel, record.periodKey, record.year]
-          .map((item) => normalize(item))
-          .some((item) => item.includes(searchText));
+        !searchText
+        || matchesSearchQuery(record.searchIndex, searchText)
+        || textSearchMatchKeys.has(buildUgSubelementoLookupKey(record))
+        || textSearchMatchedUgCodes.has(String(record.unidadeGestoraCode || "").trim());
 
       return yearOk && elementoOk && subelementoOk && unidadeOk && periodStartOk && periodEndOk && searchOk;
     });
   }, [
     appliedSearch,
-    records,
+    recordsForVisibleTabs,
     selectedElementos,
     selectedPeriodEnd,
     selectedPeriodStart,
     selectedSubelementos,
     selectedUnidades,
     selectedYear,
+    textSearchMatchKeys,
+    textSearchMatchedUgCodes,
   ]);
+
+  const preLiquidationDetailLookup = useMemo(() => {
+    const lookup = new Map();
+
+    filteredDetailedRecords.forEach((record) => {
+      const keys = [record.nutitulo, record.contractNumber]
+        .map((value) => String(value || "").trim())
+        .filter(Boolean);
+
+      if (keys.length === 0) return;
+
+      keys.forEach((key) => {
+        const current = lookup.get(key) || {
+          subelementoCode: "",
+          subelementoLabel: "",
+          liquidationDate: "",
+          empenhoNumber: "",
+          sourceOrigin: "",
+        };
+
+        const sourceOrigin = normalize(record.sourceOrigin);
+        const nextSubelementoCode =
+          current.subelementoCode
+          || (sourceOrigin.includes("empenho") ? record.subelementoCode : "")
+          || record.subelementoCode
+          || "";
+        const nextSubelementoLabel =
+          current.subelementoLabel
+          || (sourceOrigin.includes("empenho") ? record.subelementoLabel : "")
+          || record.subelementoLabel
+          || "";
+        const nextLiquidationDate =
+          current.liquidationDate
+          || (sourceOrigin.includes("liquidacao") ? record.liquidationDate : "")
+          || record.liquidationDate
+          || "";
+        const nextEmpenhoNumber =
+          current.empenhoNumber
+          || (sourceOrigin.includes("empenho") ? record.empenhoNumber : "")
+          || record.empenhoNumber
+          || "";
+
+        lookup.set(key, {
+          subelementoCode: nextSubelementoCode,
+          subelementoLabel: nextSubelementoLabel,
+          liquidationDate: nextLiquidationDate,
+          empenhoNumber: nextEmpenhoNumber,
+          sourceOrigin: current.sourceOrigin || record.sourceOrigin || "",
+        });
+      });
+    });
+
+    return lookup;
+  }, [filteredDetailedRecords]);
 
   const visiblePeriods = useMemo(
     () =>
@@ -2397,6 +3928,16 @@ export default function CusteioDashboard() {
     return series && Object.keys(series).length > 0 ? series : IPCA_MENSAL_FALLBACK;
   }, [dataset]);
 
+  const ipcaAnnualEstimated = useMemo(
+    () => !(dataset?.ipcaAnnual && Object.keys(dataset.ipcaAnnual).length > 0),
+    [dataset]
+  );
+
+  const ipcaMonthlyEstimated = useMemo(
+    () => !(dataset?.ipcaMonthly && Object.keys(dataset.ipcaMonthly).length > 0),
+    [dataset]
+  );
+
   const currentMetricNoun = useMemo(() => {
     if (selectedMetric === "vlempenhado") return "Empenhamento";
     if (selectedMetric === "vlliquidado") return "Liquidação";
@@ -2411,6 +3952,9 @@ export default function CusteioDashboard() {
         return {
           year,
           value: yearRecords.reduce((acc, record) => acc + record[selectedMetric], 0),
+          vlempenhado: yearRecords.reduce((acc, record) => acc + record.vlempenhado, 0),
+          vlliquidado: yearRecords.reduce((acc, record) => acc + record.vlliquidado, 0),
+          vlpago: yearRecords.reduce((acc, record) => acc + record.vlpago, 0),
         };
       }),
     [availableYears, selectedMetric, visibleRecords]
@@ -2441,6 +3985,74 @@ export default function CusteioDashboard() {
     () => aggregateBy(visibleRecords, "subelementoLabel", selectedMetric, 5000),
     [visibleRecords, selectedMetric]
   );
+
+  const concentrationSourceRecords = useMemo(
+    () => (visibleRecords.length > 0 ? visibleRecords : filteredDetailedRecords),
+    [filteredDetailedRecords, visibleRecords]
+  );
+
+  const creditorConcentrationRows = useMemo(
+    () =>
+      activeTab === "creditorConcentration"
+        ? buildCreditorConcentrationRows(concentrationSourceRecords, activeFilters)
+        : [],
+    [activeFilters, activeTab, concentrationSourceRecords]
+  );
+
+  const missingContractRows = useMemo(
+    () => (activeTab === "withoutContract" ? buildMissingContractRows(filteredDetailedRecords) : []),
+    [activeTab, filteredDetailedRecords]
+  );
+
+  const preLiquidationPaymentRows = useMemo(
+    () => (
+      activeTab === "preLiquidationPayments"
+        ? buildPreLiquidationRows(filteredDetailedRecords).map((row) => {
+            const fallback =
+              preLiquidationDetailLookup.get(String(row.nutitulo || "").trim())
+              || preLiquidationDetailLookup.get(String(row.contractNumber || "").trim());
+            return {
+              ...row,
+              subelementoCode: row.subelementoCode || fallback?.subelementoCode || "",
+              subelementoLabel:
+                row.subelementoLabel
+                || fallback?.subelementoLabel
+                || (selectedSubelementos.length === 1
+                  ? dimensionLookup.subelementos.get(selectedSubelementos[0])?.label
+                  : "")
+                || "Subelemento não informado",
+              liquidationDate: row.liquidationDate || fallback?.liquidationDate || "",
+              empenhoNumber: row.empenhoNumber || fallback?.empenhoNumber || "",
+            };
+          })
+        : []
+    ),
+    [activeTab, dimensionLookup.subelementos, filteredDetailedRecords, preLiquidationDetailLookup, selectedSubelementos]
+  );
+
+  const itemServiceRows = useMemo(
+    () => (activeTab === "itemServices" ? buildItemServiceRows(filteredDetailedRecords, selectedMetric) : []),
+    [activeTab, filteredDetailedRecords, selectedMetric]
+  );
+
+  const procurementModeRows = useMemo(
+    () => (activeTab === "procurementModes" ? buildProcurementModeRows(filteredDetailedRecords, selectedMetric) : []),
+    [activeTab, filteredDetailedRecords, selectedMetric]
+  );
+
+  const contractRows = useMemo(() => {
+    if (activeTab !== "contracts") return [];
+    const startDate = parseFlexibleDate(selectedPeriodStartInput);
+    const endDate = parseFlexibleDate(selectedPeriodEndInput);
+
+    return buildContractRows(filteredDetailedRecords).filter((row) => {
+      const contractEnd = parseFlexibleDate(row.contractEndDate);
+      if (!contractEnd) return true;
+      if (startDate && contractEnd < startDate) return false;
+      if (endDate && contractEnd > endDate) return false;
+      return true;
+    });
+  }, [activeTab, filteredDetailedRecords, selectedPeriodEndInput, selectedPeriodStartInput]);
 
   const distributionRelations = useMemo(() => {
     if (activeTab !== "distribution") {
@@ -2559,6 +4171,41 @@ export default function CusteioDashboard() {
     return rankingTotalDespesa;
   }, [rankingRelations.bySubelemento, rankingTotalDespesa, selectedSubelementInRanking]);
 
+  const activeVariationIPCA = useMemo(
+    () => getIPCAForRow({ period: effectiveAlertEndPeriod }, "period", ipcaAnnual, ipcaMonthly) ?? 0,
+    [effectiveAlertEndPeriod, ipcaAnnual, ipcaMonthly]
+  );
+
+  const rankingSubelementVariationMap = useMemo(
+    () =>
+      activeTab === "trends"
+        ? buildComparisonMetaMap({
+            records: visibleRecords,
+            metricKey: selectedMetric,
+            startPeriodKey: effectiveAlertStartPeriod,
+            endPeriodKey: effectiveAlertEndPeriod,
+            groupKey: "subelementoLabel",
+            ipcaValue: activeVariationIPCA,
+          })
+        : new Map(),
+    [activeTab, activeVariationIPCA, effectiveAlertEndPeriod, effectiveAlertStartPeriod, selectedMetric, visibleRecords]
+  );
+
+  const rankingUgVariationMap = useMemo(
+    () =>
+      activeTab === "trends"
+        ? buildComparisonMetaMap({
+            records: visibleRecords,
+            metricKey: selectedMetric,
+            startPeriodKey: effectiveAlertStartPeriod,
+            endPeriodKey: effectiveAlertEndPeriod,
+            groupKey: "unidadeGestoraLabel",
+            ipcaValue: activeVariationIPCA,
+          })
+        : new Map(),
+    [activeTab, activeVariationIPCA, effectiveAlertEndPeriod, effectiveAlertStartPeriod, selectedMetric, visibleRecords]
+  );
+
   const monthlyVisibleTotals = useMemo(() => {
     if (!["monthly", "trends", "ugRanking"].includes(activeTab)) return [];
 
@@ -2569,9 +4216,15 @@ export default function CusteioDashboard() {
         periodKey: record.periodKey,
         label: `${record.periodKey} - ${record.monthLabel}`,
         value: 0,
+        vlempenhado: 0,
+        vlliquidado: 0,
+        vlpago: 0,
       };
 
       current.value += record[selectedMetric];
+      current.vlempenhado += record.vlempenhado;
+      current.vlliquidado += record.vlliquidado;
+      current.vlpago += record.vlpago;
       grouped.set(record.periodKey, current);
     });
 
@@ -2819,33 +4472,54 @@ export default function CusteioDashboard() {
     }
   }, [activeTab, selectedEvolutionSubelement, selectedRankingPeriod, topSubelementTrendSeries.series]);
 
-  const effectiveAlertStartPeriod = selectedPeriodStart === "all" ? visiblePeriods[0]?.periodKey || null : selectedPeriodStart;
-  const effectiveAlertEndPeriod =
-    selectedPeriodEnd === "all" ? visiblePeriods.at(-1)?.periodKey || null : selectedPeriodEnd;
+  const effectiveAlertThreshold = useMemo(() => {
+    if (!effectiveAlertStartPeriod || !effectiveAlertEndPeriod) return alertThreshold;
+    const startYear = String(effectiveAlertStartPeriod).slice(0, 4);
+    const endYear = String(effectiveAlertEndPeriod).slice(0, 4);
+    return startYear === endYear ? 10 : 50;
+  }, [alertThreshold, effectiveAlertEndPeriod, effectiveAlertStartPeriod]);
+
+  const itemVariationRows = useMemo(
+    () =>
+      activeTab === "itemVariation"
+        ? buildItemVariationRows(
+            filteredDetailedRecords,
+            selectedMetric,
+            effectiveAlertStartPeriod,
+            effectiveAlertEndPeriod,
+            activeVariationIPCA
+          )
+        : [],
+    [activeTab, activeVariationIPCA, effectiveAlertEndPeriod, effectiveAlertStartPeriod, filteredDetailedRecords, selectedMetric]
+  );
 
   const periodComparisonRows = useMemo(
     () =>
-      buildGroupedVariationRows({
-        records: visibleRecords,
-        metricKey: selectedMetric,
-        startPeriodKey: effectiveAlertStartPeriod,
-        endPeriodKey: effectiveAlertEndPeriod,
-        grouping: alertGrouping,
-        threshold: alertThreshold,
-      }),
-    [alertGrouping, alertThreshold, effectiveAlertEndPeriod, effectiveAlertStartPeriod, selectedMetric, visibleRecords]
+      activeTab === "alerts"
+        ? buildGroupedVariationRows({
+            records: visibleRecords,
+            metricKey: selectedMetric,
+            startPeriodKey: effectiveAlertStartPeriod,
+            endPeriodKey: effectiveAlertEndPeriod,
+            grouping: alertGrouping,
+            threshold: effectiveAlertThreshold,
+          })
+        : [],
+    [activeTab, alertGrouping, effectiveAlertEndPeriod, effectiveAlertStartPeriod, effectiveAlertThreshold, selectedMetric, visibleRecords]
   );
 
   const historicalAlertRows = useMemo(
     () =>
-      buildHistoricalAverageRows({
-        records: historyScopedRecords,
-        metricKey: selectedMetric,
-        endPeriodKey: effectiveAlertEndPeriod,
-        grouping: alertGrouping,
-        threshold: alertThreshold,
-      }),
-    [alertGrouping, alertThreshold, effectiveAlertEndPeriod, historyScopedRecords, selectedMetric]
+      activeTab === "alerts"
+        ? buildHistoricalAverageRows({
+            records: historyScopedRecords,
+            metricKey: selectedMetric,
+            endPeriodKey: effectiveAlertEndPeriod,
+            grouping: alertGrouping,
+            threshold: effectiveAlertThreshold,
+          })
+        : [],
+    [activeTab, alertGrouping, effectiveAlertEndPeriod, effectiveAlertThreshold, historyScopedRecords, selectedMetric]
   );
 
   const periodEndTotal = useMemo(() => {
@@ -2862,7 +4536,7 @@ export default function CusteioDashboard() {
     const highestHistoryAlert = historicalAlertRows[0];
 
     return [
-      { label: "Limite atual de alerta", value: `${alertThreshold.toFixed(0)}%` },
+      { label: "Limite atual de alerta", value: `${effectiveAlertThreshold.toFixed(0)}%` },
       { label: "Alertas entre períodos", value: String(exceededPeriodCount) },
       { label: "Alertas sobre média histórica", value: String(exceededHistoryCount) },
       { label: "Maior variação entre períodos", value: highestPeriodAlert ? highestPeriodAlert.label : "--" },
@@ -2875,7 +4549,7 @@ export default function CusteioDashboard() {
             : "--",
       },
     ];
-  }, [alertThreshold, effectiveAlertEndPeriod, effectiveAlertStartPeriod, historicalAlertRows, periodComparisonRows]);
+  }, [effectiveAlertEndPeriod, effectiveAlertStartPeriod, effectiveAlertThreshold, historicalAlertRows, periodComparisonRows]);
 
   const selectedYears = useMemo(() => {
     if (selectedYear !== "all") return [Number(selectedYear)];
@@ -3013,19 +4687,25 @@ export default function CusteioDashboard() {
     }))
   ), []);
 
-  const buildRankingRows = useCallback((items, referenceTotal = null) => {
+  const buildRankingRows = useCallback((items, referenceTotal = null, comparisonMetaMap = null) => {
     const total = Number.isFinite(referenceTotal) && referenceTotal > 0
       ? referenceTotal
       : (items || []).reduce((acc, item) => acc + item.value, 0);
 
-    return (items || []).map((item, index) => ({
-      Posição: index + 1,
-      Item: item.label,
-      Valor: item.value,
-      "Valor Formatado": fmtCurrency(item.value),
-      Percentual: total > 0 ? (item.value / total) * 100 : 0,
-      "Percentual Formatado": total > 0 ? fmtPercent((item.value / total) * 100) : "--",
-    }));
+    return (items || []).map((item, index) => {
+      const comparisonMeta = comparisonMetaMap?.get(item.label);
+      return {
+        Posição: index + 1,
+        Item: item.label,
+        Valor: item.value,
+        "Valor Formatado": fmtCurrency(item.value),
+        Percentual: total > 0 ? (item.value / total) * 100 : 0,
+        "Percentual Formatado": total > 0 ? fmtPercent((item.value / total) * 100) : "--",
+        "Variação %": comparisonMeta?.variationPercent ?? null,
+        "Variação Formatada": comparisonMeta?.variationLabel ?? "--",
+        IPCA: comparisonMeta?.ipcaValue ?? null,
+      };
+    });
   }, []);
 
   const buildTrendSeriesRows = useCallback((seriesData, periods) => {
@@ -3239,8 +4919,8 @@ export default function CusteioDashboard() {
       distributionSub: [{ name: "distribuicao_subelemento", rows: topSubelementos.map((item) => ({ Item: item.label, Valor: item.value, "Valor Formatado": fmtCurrency(item.value), Percentual: item.pct, "Percentual Formatado": fmtPercent(item.pct) })) }],
       distributionUg: [{ name: "distribuicao_ug", rows: topUnidades.map((item) => ({ Item: item.label, Valor: item.value, "Valor Formatado": fmtCurrency(item.value), Percentual: item.pct, "Percentual Formatado": fmtPercent(item.pct) })) }],
       distributionRelations: [{ name: "relacionamentos", rows: distributionRelationRows }],
-      trendsSub: [{ name: "ranking_subelementos", rows: buildRankingRows(rankingSubelementos, rankingSubelementosReferenceTotal) }],
-      trendsUg: [{ name: "ranking_ugs", rows: buildRankingRows(rankingUnidades, rankingUnidadesReferenceTotal) }],
+      trendsSub: [{ name: "ranking_subelementos", rows: buildRankingRows(rankingSubelementos, rankingSubelementosReferenceTotal, rankingSubelementVariationMap) }],
+      trendsUg: [{ name: "ranking_ugs", rows: buildRankingRows(rankingUnidades, rankingUnidadesReferenceTotal, rankingUgVariationMap) }],
       matrixSub: [{ name: "matriz_subelemento", rows: buildMatrixExportRows(matrixBySubelemento, years) }],
       matrixUg: [{ name: "matriz_ug", rows: buildMatrixExportRows(matrixByUnidade, years) }],
       evolution: [
@@ -3251,7 +4931,7 @@ export default function CusteioDashboard() {
         name: "configuracao_alertas",
         rows: [
           { Campo: "Agrupamento", Valor: alertGrouping },
-          { Campo: "Limite de Alerta (%)", Valor: alertThreshold },
+          { Campo: "Limite de Alerta (%)", Valor: effectiveAlertThreshold },
           { Campo: "Período Inicial", Valor: effectiveAlertStartPeriod || "--" },
           { Campo: "Período Final", Valor: effectiveAlertEndPeriod || "--" },
         ],
@@ -3259,6 +4939,87 @@ export default function CusteioDashboard() {
       alertsInsights: [{ name: "insights_alertas", rows: buildInsightRows(alertInsightCards) }],
       alertsPeriod: [{ name: "alertas_periodo", rows: buildAlertExportRows(periodComparisonRows.slice(0, 12), effectiveAlertStartPeriod || "Início", effectiveAlertEndPeriod || "Fim", periodEndTotal) }],
       alertsHistorical: [{ name: "alertas_historicos", rows: buildAlertExportRows(historicalAlertRows.slice(0, 12), "Média 12 Meses", effectiveAlertEndPeriod || "Período Final", periodEndTotal) }],
+      creditorConcentration: [{
+        name: "concentracao_ug_subelemento",
+        rows: creditorConcentrationRows.map((row) => ({
+          UG: row.ug,
+          "Descrição UG": row.ugDescricao,
+          Subelemento: row.subelemento,
+          "Descrição Subelemento": row.subelementoDescricao,
+          Empenhado: row.empenhado,
+          "Empenhado Formatado": fmtCurrency(row.empenhado),
+          Liquidado: row.liquidado,
+          "Liquidado Formatado": fmtCurrency(row.liquidado),
+          Pago: row.pago,
+          "Pago Formatado": fmtCurrency(row.pago),
+          Registros: row.registros,
+        })),
+      }],
+      preLiquidation: [{
+        name: "pagamentos_pre_liquidacao",
+        rows: preLiquidationPaymentRows.map((row) => ({
+          "Unidade Gestora": row.unidadeGestoraLabel || "--",
+          Subelemento: row.subelementoLabel || "--",
+          Credor: row.creditorLabel || "--",
+          Empenho: row.empenhoNumber || "--",
+          "Ordem Bancária": row.ordemBancariaNumber || "--",
+          "Data Pagamento": formatDetailedDate(row.paymentDate),
+          "Data Liquidação": formatDetailedDate(row.liquidationDate),
+          "Valor Pago": row.vlpago || row.value,
+          "Valor Pago Formatado": fmtCurrency(row.vlpago || row.value),
+        })),
+      }],
+      withoutContract: [{
+        name: "despesas_sem_contrato",
+        rows: missingContractRows.map((row) => ({
+          "Unidade Gestora": row.unidadeGestoraLabel || "--",
+          Subelemento: row.subelementoLabel || "--",
+          Empenhado: row.vlempenhado,
+          Liquidado: row.vlliquidado,
+          Pago: row.vlpago,
+        })),
+      }],
+      itemServices: [{
+        name: "itens_servicos",
+        rows: itemServiceRows.map((row) => ({
+          Descrição: row.description,
+          Classificação: row.classification,
+          "Objeto Contrato": row.contractObject,
+          Quantidade: row.quantity,
+          "Valor Unitário": row.unitValue,
+          "Valor Total": row.totalValue,
+          UG: row.unidadeGestoraLabel,
+        })),
+      }],
+      itemVariation: [{
+        name: "variacao_itens_servicos",
+        rows: itemVariationRows.map((row) => ({
+          Descrição: row.description,
+          UG: row.unidadeGestoraLabel,
+          "Valor Inicial": row.startValue,
+          "Valor Final": row.endValue,
+          "Variação %": row.variationPercent,
+          IPCA: row.ipcaValue,
+        })),
+      }],
+      procurementModes: [{
+        name: "modalidades",
+        rows: procurementModeRows.map((row) => ({
+          Categoria: row.category,
+          Modalidade: row.mode,
+          Total: row.totalValue,
+        })),
+      }],
+      contracts: [{
+        name: "contratos_vigencias",
+        rows: contractRows.map((row) => ({
+          Contrato: row.contractNumber,
+          UG: row.unidadeGestoraLabel,
+          "Data Início": formatDetailedDate(row.contractStartDate),
+          "Data Fim": formatDetailedDate(row.contractEndDate),
+          "Próximo do Vencimento": row.isExpiringSoon ? "Sim" : "Não",
+        })),
+      }],
     };
   }, [
     alertGrouping,
@@ -3271,6 +5032,8 @@ export default function CusteioDashboard() {
     buildMatrixExportRows,
     buildRankingRows,
     buildTrendSeriesRows,
+    creditorConcentrationRows,
+    contractRows,
     distributionHover,
     distributionSelectionDetails.othersItems,
     distributionSelectionDetails.relationInfo,
@@ -3288,10 +5051,17 @@ export default function CusteioDashboard() {
     monthlyVariationRows,
     periodComparisonRows,
     periodEndTotal,
+    procurementModeRows,
+    preLiquidationPaymentRows,
     rankingSubelementos,
+    rankingSubelementVariationMap,
     rankingSubelementosReferenceTotal,
     rankingUnidades,
+    rankingUgVariationMap,
     rankingUnidadesReferenceTotal,
+    itemServiceRows,
+    itemVariationRows,
+    missingContractRows,
     topSubelementTrendSeries.periods,
     topSubelementTrendSeries.series,
     topSubelementos,
@@ -3324,6 +5094,8 @@ export default function CusteioDashboard() {
     setElementoSearch("");
     setSubelementoSearch("");
     setUnidadeSearch("");
+    setProcurementModeSearch("");
+    setSelectedProcurementModes([]);
   };
 
   const toggleElemento = (value) => {
@@ -3340,6 +5112,12 @@ export default function CusteioDashboard() {
 
   const toggleUnidade = (value) => {
     setSelectedUnidades((current) =>
+      current.includes(value) ? current.filter((item) => item !== value) : [...current, value]
+    );
+  };
+
+  const toggleProcurementMode = (value) => {
+    setSelectedProcurementModes((current) =>
       current.includes(value) ? current.filter((item) => item !== value) : [...current, value]
     );
   };
@@ -3484,6 +5262,20 @@ export default function CusteioDashboard() {
             </div>
 
             <div className="bi-filter-group bi-filter-group-wide">
+              <MultiSelectChecklist
+                label="Modalidade de Licitação"
+                placeholder="Buscar modalidade..."
+                emptySelectionLabel="Selecionar modalidade"
+                options={procurementModeOptions}
+                selectedValues={selectedProcurementModes}
+                searchValue={procurementModeSearch}
+                onSearchChange={setProcurementModeSearch}
+                onToggleValue={toggleProcurementMode}
+                onClear={() => setSelectedProcurementModes([])}
+              />
+            </div>
+
+            <div className="bi-filter-group bi-filter-group-wide">
               <button
                 type="button"
                 className="bi-clear-button"
@@ -3554,7 +5346,13 @@ export default function CusteioDashboard() {
                   onExport={handleExportBlock}
                   busy={exportingKey === "pdf:variacao_anual" || exportingKey === "jpg:variacao_anual" || exportingKey === "xlsx:variacao_anual"}
                 >
-                  <VariationTable rows={yearlyVisibleTotals} showIPCA ipcaAnnual={ipcaAnnual} ipcaMonthly={ipcaMonthly} />
+                  <VariationTable
+                    rows={yearlyVisibleTotals}
+                    showIPCA
+                    ipcaAnnual={ipcaAnnual}
+                    ipcaMonthly={ipcaMonthly}
+                    ipcaEstimated={ipcaAnnualEstimated}
+                  />
                 </ExportableBlock>
               </section>
             </ExportableBlock>
@@ -3664,6 +5462,7 @@ export default function CusteioDashboard() {
                     showIPCA
                     ipcaAnnual={ipcaAnnual}
                     ipcaMonthly={ipcaMonthly}
+                    ipcaEstimated={ipcaMonthlyEstimated}
                   />
                 </ExportableBlock>
               </section>
@@ -3846,6 +5645,7 @@ export default function CusteioDashboard() {
                   selectedItem={selectedSubelementInRanking}
                   relatedLabels={rankingSubelementoRelatedLabels}
                   referenceTotal={rankingSubelementosReferenceTotal}
+                  comparisonMetaMap={rankingSubelementVariationMap}
                   limitHeight
                 />
               </ExportableBlock>
@@ -3863,6 +5663,7 @@ export default function CusteioDashboard() {
                   selectedItem={selectedUgInRanking}
                   relatedLabels={rankingUgRelatedLabels}
                   referenceTotal={rankingUnidadesReferenceTotal}
+                  comparisonMetaMap={rankingUgVariationMap}
                   limitHeight
                 />
               </ExportableBlock>
@@ -4069,8 +5870,9 @@ export default function CusteioDashboard() {
                           min="0"
                           step="1"
                           className="bi-search-input"
-                          value={alertThreshold}
+                          value={effectiveAlertThreshold}
                           onChange={(e) => setAlertThreshold(Math.max(0, Number(e.target.value) || 0))}
+                          disabled
                         />
                       </div>
                     </div>
@@ -4081,8 +5883,7 @@ export default function CusteioDashboard() {
                         período ficou acima da média dos 12 meses anteriores.
                       </p>
                       <p>
-                        Sugestão de leitura: 10% para alertas mensais e 50% para leituras anuais. O ajuste aqui afeta somente
-                        esta aba.
+                        Regra automática aplicada: 10% para leituras mensais e 50% para leituras anuais.
                       </p>
                     </div>
                   </section>
@@ -4145,6 +5946,126 @@ export default function CusteioDashboard() {
               </section>
             </ExportableBlock>
           </>
+        )}
+
+        {activeTab === "creditorConcentration" && (
+          <ExportableBlock
+            title="concentracao_ug_subelemento"
+            targetRef={creditorConcentrationExportRef}
+            sheets={exportBundles.creditorConcentration}
+            onExport={handleExportBlock}
+            busy={exportingKey === "pdf:concentracao_ug_subelemento" || exportingKey === "jpg:concentracao_ug_subelemento" || exportingKey === "xlsx:concentracao_ug_subelemento"}
+            buttonLabel="Baixar bloco"
+            variant="section"
+          >
+            <section className="bi-grid bi-grid-single">
+              <CreditorConcentrationTable rows={creditorConcentrationRows} />
+            </section>
+          </ExportableBlock>
+        )}
+
+        {activeTab === "withoutContract" && (
+          <ExportableBlock
+            title="despesas_sem_contrato"
+            targetRef={withoutContractExportRef}
+            sheets={exportBundles.withoutContract}
+            onExport={handleExportBlock}
+            busy={exportingKey === "pdf:despesas_sem_contrato" || exportingKey === "jpg:despesas_sem_contrato" || exportingKey === "xlsx:despesas_sem_contrato"}
+            buttonLabel="Baixar bloco"
+            variant="section"
+          >
+            <section className="bi-grid bi-grid-single">
+              <MissingContractTable rows={missingContractRows} hasDetailedData={detailedRecords.length > 0} />
+            </section>
+          </ExportableBlock>
+        )}
+
+        {activeTab === "preLiquidationPayments" && (
+          <ExportableBlock
+            title="pagamentos_pre_liquidacao"
+            targetRef={preLiquidationExportRef}
+            sheets={exportBundles.preLiquidation}
+            onExport={handleExportBlock}
+            busy={exportingKey === "pdf:pagamentos_pre_liquidacao" || exportingKey === "jpg:pagamentos_pre_liquidacao" || exportingKey === "xlsx:pagamentos_pre_liquidacao"}
+            buttonLabel="Baixar bloco"
+            variant="section"
+          >
+            <section className="bi-grid bi-grid-single">
+              <PreLiquidationPaymentTable
+                rows={preLiquidationPaymentRows}
+                hasDetailedData={detailedRecords.length > 0}
+              />
+            </section>
+          </ExportableBlock>
+        )}
+
+        {activeTab === "itemServices" && (
+          <ExportableBlock
+            title="itens_servicos"
+            targetRef={itemServicesExportRef}
+            sheets={exportBundles.itemServices}
+            onExport={handleExportBlock}
+            busy={exportingKey === "pdf:itens_servicos" || exportingKey === "jpg:itens_servicos" || exportingKey === "xlsx:itens_servicos"}
+            buttonLabel="Baixar bloco"
+            variant="section"
+          >
+            <section className="bi-grid bi-grid-single">
+              <ItemServiceTable rows={itemServiceRows} hasDetailedData={detailedRecords.length > 0} metricLabel={currentMetricLabel} />
+            </section>
+          </ExportableBlock>
+        )}
+
+        {activeTab === "itemVariation" && (
+          <ExportableBlock
+            title="variacao_itens_servicos"
+            targetRef={itemVariationExportRef}
+            sheets={exportBundles.itemVariation}
+            onExport={handleExportBlock}
+            busy={exportingKey === "pdf:variacao_itens_servicos" || exportingKey === "jpg:variacao_itens_servicos" || exportingKey === "xlsx:variacao_itens_servicos"}
+            buttonLabel="Baixar bloco"
+            variant="section"
+          >
+            <section className="bi-grid bi-grid-single">
+              <ItemVariationTable
+                rows={itemVariationRows}
+                hasDetailedData={detailedRecords.length > 0}
+                startPeriodKey={effectiveAlertStartPeriod}
+                endPeriodKey={effectiveAlertEndPeriod}
+              />
+            </section>
+          </ExportableBlock>
+        )}
+
+        {activeTab === "procurementModes" && (
+          <ExportableBlock
+            title="modalidades"
+            targetRef={procurementModesExportRef}
+            sheets={exportBundles.procurementModes}
+            onExport={handleExportBlock}
+            busy={exportingKey === "pdf:modalidades" || exportingKey === "jpg:modalidades" || exportingKey === "xlsx:modalidades"}
+            buttonLabel="Baixar bloco"
+            variant="section"
+          >
+            <section className="bi-grid bi-grid-single">
+              <ProcurementModeTable rows={procurementModeRows} hasDetailedData={detailedRecords.length > 0} />
+            </section>
+          </ExportableBlock>
+        )}
+
+        {activeTab === "contracts" && (
+          <ExportableBlock
+            title="contratos_vigencias"
+            targetRef={contractsExportRef}
+            sheets={exportBundles.contracts}
+            onExport={handleExportBlock}
+            busy={exportingKey === "pdf:contratos_vigencias" || exportingKey === "jpg:contratos_vigencias" || exportingKey === "xlsx:contratos_vigencias"}
+            buttonLabel="Baixar bloco"
+            variant="section"
+          >
+            <section className="bi-grid bi-grid-single">
+              <ContractsTable rows={contractRows} hasDetailedData={detailedRecords.length > 0} />
+            </section>
+          </ExportableBlock>
         )}
       </div>
     </div>

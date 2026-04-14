@@ -8,7 +8,9 @@ import { normalizeText } from "../utils/textHelpers";
 import { loadSpreadsheetRecords } from "../utils/workbookImport";
 
 function ContractListSection({ groups, orgao }) {
-  if (!orgao) return null;
+  if (!orgao) {
+    return <div className="empty-state">Órgão não encontrado para esta rota.</div>;
+  }
   if (groups.length === 0) {
     return <div className="empty-state">Nenhum contrato encontrado para {orgao.sigla}.</div>;
   }
