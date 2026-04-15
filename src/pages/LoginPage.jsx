@@ -5,6 +5,7 @@ import { saveCusteioSyncPatch } from "../utils/custeioSyncSession";
 import "../styles/Auth.css";
 
 const DOMAIN = "@sef.sc.gov.br";
+const LOGIN_SYNC_TIMEOUT_MS = 4000;
 
 export default function LoginPage() {
   const { login, register } = useAuth();
@@ -27,7 +28,14 @@ export default function LoginPage() {
 
   async function syncPortalDataOnLogin() {
     try {
-      const response = await fetch("/api/sync-custeio", { method: "POST" });
+      const controller = new AbortController();
+      const timeoutId = window.setTimeout(() => controller.abort(), LOGIN_SYNC_TIMEOUT_MS);
+      let response;
+      try {
+        response = await fetch("/api/sync-custeio", { method: "POST", signal: controller.signal });
+      } finally {
+        window.clearTimeout(timeoutId);
+      }
       if (!response.ok) return;
 
       const result = await response.json();
@@ -61,8 +69,10 @@ export default function LoginPage() {
       } else {
         await register(name, email, password);
       }
-      await syncPortalDataOnLogin();
       navigate(from, { replace: true });
+      window.setTimeout(() => {
+        syncPortalDataOnLogin();
+      }, 0);
     } catch (err) {
       const map = {
         "auth/user-not-found":   "Nenhuma conta encontrada com este e-mail.",
