@@ -51,6 +51,7 @@ const VIRTUAL_ALERT_VIEWPORT_HEIGHT = 620;
 const VIRTUAL_TABLE_VIEWPORT_HEIGHT = 620;
 const VIRTUAL_CONCENTRATION_ROW_HEIGHT = 108;
 const VIRTUAL_PRELIQUIDATION_ROW_HEIGHT = 148;
+const SYNC_REQUEST_TIMEOUT_MS = 12000;
 
 const IPCA_ANUAL_FALLBACK = {
   2021: 10.06,
@@ -3419,15 +3420,36 @@ export default function CusteioDashboard() {
     try {
       setIsRefreshing(true);
       setRefreshInfo("");
+      setStatus("Carregando base oficial publicada...");
+
+      const storedPatch = loadCusteioSyncPatch();
+      const cacheResponse = await fetch(`${CUSTEIO_DATA_SOURCE.cache.aggregatedJson}?t=${Date.now()}`);
+      if (!cacheResponse.ok) {
+        throw new Error(`Falha ao carregar ${CUSTEIO_DATA_SOURCE.cache.aggregatedJson}: ${cacheResponse.status}`);
+      }
+
+      const officialCache = await cacheResponse.json();
+      const initialDataset = storedPatch ? mergeCusteioDataset(officialCache, storedPatch) : officialCache;
+
+      setDataset(initialDataset);
+      setLastSyncAt(storedPatch?.syncedAt ? new Date(storedPatch.syncedAt) : null);
       setStatus("Sincronizando base oficial do portal...");
 
       let syncCompleted = false;
       let syncPatch = null;
 
       try {
-        const syncResponse = await fetch("/api/sync-custeio", {
-          method: "POST",
-        });
+        const controller = new AbortController();
+        const timeoutId = window.setTimeout(() => controller.abort(), SYNC_REQUEST_TIMEOUT_MS);
+        let syncResponse;
+        try {
+          syncResponse = await fetch("/api/sync-custeio", {
+            method: "POST",
+            signal: controller.signal,
+          });
+        } finally {
+          window.clearTimeout(timeoutId);
+        }
 
         if (syncResponse.ok) {
           const syncResult = await syncResponse.json();
@@ -3443,25 +3465,18 @@ export default function CusteioDashboard() {
         syncCompleted = false;
       }
 
-      setStatus("Recarregando base oficial sincronizada...");
-      const response = await fetch(`${CUSTEIO_DATA_SOURCE.cache.aggregatedJson}?t=${Date.now()}`);
-      if (!response.ok) {
-        throw new Error(`Falha ao carregar ${CUSTEIO_DATA_SOURCE.cache.aggregatedJson}: ${response.status}`);
-      }
-
-      const officialCache = await response.json();
-      const storedPatch = syncPatch || loadCusteioSyncPatch();
-      const mergedDataset = storedPatch ? mergeCusteioDataset(officialCache, storedPatch) : officialCache;
+      const resolvedPatch = syncPatch || storedPatch;
+      const mergedDataset = resolvedPatch ? mergeCusteioDataset(officialCache, resolvedPatch) : officialCache;
 
       setDataset(mergedDataset);
-      setLastSyncAt(storedPatch?.syncedAt ? new Date(storedPatch.syncedAt) : null);
+      setLastSyncAt(resolvedPatch?.syncedAt ? new Date(resolvedPatch.syncedAt) : null);
       setStatus("");
       setRefreshInfo(
         syncPatch
           ? "Base atualizada no login com os dados mais recentes do portal."
           : syncCompleted
             ? "Base oficial sincronizada automaticamente com o Portal da Transparência."
-            : "Painel recarregado com a base oficial publicada disponível."
+            : "Painel carregado com a base oficial publicada disponível."
       );
     } catch (error) {
       setStatus(error instanceof Error ? error.message : "Não foi possível sincronizar os dados oficiais do painel.");
