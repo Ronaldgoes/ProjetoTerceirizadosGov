@@ -3342,6 +3342,7 @@ export default function CusteioDashboard() {
   }).format(new Date());
   const [dataset, setDataset] = useState(null);
   const [lastSyncAt, setLastSyncAt] = useState(null);
+  const [lastRefreshAttemptAt, setLastRefreshAttemptAt] = useState(null);
   const [status, setStatus] = useState("Carregando painel...");
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [refreshInfo, setRefreshInfo] = useState("");
@@ -3418,6 +3419,7 @@ export default function CusteioDashboard() {
 
   const refreshDashboard = useCallback(async () => {
     try {
+      setLastRefreshAttemptAt(new Date());
       setIsRefreshing(true);
       setRefreshInfo("");
       setStatus("Carregando base oficial publicada...");
@@ -3501,6 +3503,15 @@ export default function CusteioDashboard() {
       timeStyle: "short",
     }).format(dateToUse);
   }, [dataset, lastSyncAt]);
+
+  const lastAttemptLabel = useMemo(() => {
+    if (!lastRefreshAttemptAt) return null;
+
+    return new Intl.DateTimeFormat("pt-BR", {
+      dateStyle: "short",
+      timeStyle: "short",
+    }).format(lastRefreshAttemptAt);
+  }, [lastRefreshAttemptAt]);
 
   const latestPortalPeriodLabel = useMemo(() => {
     const latestPeriodKey = dataset?.sourceSummary?.latestPeriodAvailable;
@@ -5156,8 +5167,9 @@ export default function CusteioDashboard() {
       <TopBar title="Monitoramento do Custeio">
         <div className="bi-refresh-stack">
           <span className="bi-topbar-status">
-            {isRefreshing ? "Sincronizando automaticamente com o portal..." : `Última sincronização: ${updatedAtLabel}`}
+            {isRefreshing ? "Sincronizando automaticamente com o portal..." : `Base carregada em: ${updatedAtLabel}`}
           </span>
+          {lastAttemptLabel ? <span className="bi-topbar-status">{`Última verificação: ${lastAttemptLabel}`}</span> : null}
           <span className="bi-topbar-status">Base do portal até: {latestPortalPeriodLabel}</span>
           <span className="bi-topbar-status">{syncCoverageLabel}</span>
           <span className="bi-topbar-status">{aggregatedRecordsLabel}</span>
