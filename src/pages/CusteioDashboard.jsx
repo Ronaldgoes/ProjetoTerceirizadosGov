@@ -1126,9 +1126,9 @@ function getConcentrationModeSummary(concentrationMode) {
   return `Faixa ${concentrationMode} credor${concentrationMode === "1" ? "" : "es"}`;
 }
 
-function resolveConcentrationBadge(percentual) {
-  if (percentual >= 80) return "ALTO";
-  if (percentual >= 50) return "MÉDIO";
+function resolveConcentrationBadge(creditorCount) {
+  if (creditorCount >= 1 && creditorCount <= 3) return "ALTO";
+  if (creditorCount >= 4 && creditorCount <= 10) return "MÉDIO";
   return "BAIXO";
 }
 
@@ -3088,10 +3088,8 @@ const ConcentrationTableRow = memo(function ConcentrationTableRow({
   if (!row) return null;
   const displayedCredores = resolveDisplayedCredores(row.allCredores, concentrationMode);
   const totalValue = getConcentrationMetricValue(row, selectedMetric);
-  const topNValue = displayedCredores.reduce((acc, creditor) => acc + getCreditorMetricValue(creditor, selectedMetric), 0);
-  const concentrationPercent = totalValue > 0 ? (topNValue / totalValue) * 100 : 0;
-  const badgeLabel = resolveConcentrationBadge(concentrationPercent);
-  const topNLabel = concentrationMode === "all" ? "Todos" : concentrationMode;
+  const creditorCount = row.allCredores?.length || row.credoresCount || displayedCredores.length || 0;
+  const badgeLabel = resolveConcentrationBadge(creditorCount);
 
   return (
     <div style={style} className="bi-virtual-list-item">
@@ -3103,8 +3101,7 @@ const ConcentrationTableRow = memo(function ConcentrationTableRow({
           <strong>{row.ugDescricao}</strong>
           <span className="bi-alert-impact">{row.subelementoDescricao}</span>
         </div>
-        <span>{row.allCredores?.length || row.credoresCount || displayedCredores.length || 0}</span>
-        <span>{topNLabel}</span>
+        <span>{creditorCount}</span>
         <span>{fmtCurrency(totalValue)}</span>
         <span className="bi-cell-stack bi-concentration-creditors">
           {displayedCredores.length > 0 ? (
@@ -3198,7 +3195,7 @@ const CreditorConcentrationTable = memo(function CreditorConcentrationTable({
             { value: "1", label: "1 CREDOR" },
             { value: "2", label: "2 CREDORES" },
             { value: "3", label: "3 CREDORES" },
-            { value: "all", label: "TODOS OS CREDORES" },
+            { value: "all", label: "MAIS CREDORES" },
           ].map((option) => (
             <button
               key={option.value}
@@ -3227,7 +3224,6 @@ const CreditorConcentrationTable = memo(function CreditorConcentrationTable({
         <div className="bi-alert-row bi-alert-head bi-alert-row-concentration">
           <span>UG / Subelemento</span>
           <span>Credores</span>
-          <span>Top N</span>
           <span>Total</span>
           <span>Principais Credores</span>
         </div>
@@ -4266,11 +4262,13 @@ export default function CusteioDashboard() {
   const filteredCreditorConcentrationRows = useMemo(() => {
     if (activeTab !== "creditorConcentration") return [];
 
-    return creditorConcentrationRows.filter((row) => {
-      const creditorCount = row.allCredores?.length || row.credoresCount || 0;
-      return matchesConcentrationMode(creditorCount, concentrationMode);
-    });
-  }, [activeTab, concentrationMode, creditorConcentrationRows]);
+    return creditorConcentrationRows
+      .filter((row) => {
+        const creditorCount = row.allCredores?.length || row.credoresCount || 0;
+        return matchesConcentrationMode(creditorCount, concentrationMode);
+      })
+      .sort((a, b) => getConcentrationMetricValue(b, selectedMetric) - getConcentrationMetricValue(a, selectedMetric));
+  }, [activeTab, concentrationMode, creditorConcentrationRows, selectedMetric]);
 
   const missingContractRows = useMemo(
     () => (activeTab === "withoutContract" ? buildMissingContractRows(filteredDetailedRecords) : []),
