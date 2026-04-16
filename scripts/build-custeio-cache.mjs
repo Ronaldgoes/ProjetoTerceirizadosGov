@@ -7,6 +7,7 @@ import {
   buildContractsExportUrl,
   buildDetailedFactsFromContracts,
   buildDetailedFactsFromSicopDetail,
+  buildDespesaCredorExportUrl,
   buildDespesaExportUrl,
   buildExtratoSicopUrl,
   buildProcurementModeOptions,
@@ -15,6 +16,7 @@ import {
   decodeCsv,
   getContractReferencePeriod,
   parseContractsCsv,
+  parseDespesaCredorCsvToRecords,
   parseDespesaCsvToRecords,
   periodEndDate,
   shiftPeriod,
@@ -25,6 +27,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(__dirname, "..");
 const outDir = path.join(root, "public", "data");
 const outFile = path.join(outDir, "custeio-oficial.json");
+const creditorChunkPrefix = "custeio-oficial-creditor-";
 
 const official = {
   monthsByYear: {
@@ -76,6 +79,7 @@ async function mapWithConcurrency(items, concurrency, worker) {
 }
 
 const records = new Map();
+const creditorRecords = new Map();
 const requestedPeriods = [];
 const fetchedPeriods = [];
 const missingPeriods = [];
@@ -93,6 +97,13 @@ for (const [year, months] of Object.entries(official.monthsByYear)) {
 
     const buffer = Buffer.from(await response.arrayBuffer());
     parseDespesaCsvToRecords(decodeCsv(buffer), records);
+
+    const creditorResponse = await fetchWithRetry(buildDespesaCredorExportUrl(year, month));
+    if (creditorResponse) {
+      const creditorBuffer = Buffer.from(await creditorResponse.arrayBuffer());
+      parseDespesaCredorCsvToRecords(decodeCsv(creditorBuffer), creditorRecords);
+    }
+
     fetchedPeriods.push(monthPeriodKey);
   }
 }
@@ -162,6 +173,29 @@ if (contractsEndDate) {
 
 await fs.mkdir(outDir, { recursive: true });
 
+const creditorFactsByYear = new Map();
+
+[...creditorRecords.values()].forEach((record) => {
+  if (!creditorFactsByYear.has(record.year)) {
+    creditorFactsByYear.set(record.year, []);
+  }
+
+  creditorFactsByYear.get(record.year).push([
+    record.year,
+    record.month,
+    record.elementoCode,
+    record.subelementoCode,
+    record.unidadeGestoraCode,
+    record.creditorCode,
+    record.creditorName,
+    record.vlempenhado,
+    record.vlliquidado,
+    record.vlpago,
+  ]);
+});
+
+const creditorChunkYears = [...creditorFactsByYear.keys()].sort((a, b) => a - b);
+
 const output = {
   generatedAt: new Date().toISOString(),
   syncedAt: new Date().toISOString(),
@@ -192,6 +226,8 @@ const output = {
   subelementos: aggregated.subelementos,
   unidades: aggregated.unidades,
   facts: aggregated.facts,
+  creditorFacts: [],
+  creditorChunkYears,
   detailedFacts,
   procurementModeOptions,
 };
@@ -205,7 +241,26 @@ try {
   console.warn(`Aviso: falha ao atualizar IPCA automaticamente: ${error instanceof Error ? error.message : String(error)}`);
 }
 
+const existingFiles = await fs.readdir(outDir);
+await Promise.all(
+  existingFiles
+    .filter((fileName) => fileName.startsWith(creditorChunkPrefix) && fileName.endsWith(".json"))
+    .map((fileName) => fs.unlink(path.join(outDir, fileName)))
+);
+
+await Promise.all(
+  creditorChunkYears.map((year) =>
+    fs.writeFile(
+      path.join(outDir, `${creditorChunkPrefix}${year}.json`),
+      JSON.stringify({
+        year,
+        creditorFacts: creditorFactsByYear.get(year) || [],
+      })
+    )
+  )
+);
+
 await fs.writeFile(outFile, JSON.stringify(output));
 console.log(
-  `Cache gerado em ${outFile} com ${aggregated.aggregatedRecords.length} registros agregados, ${contractRows.length} contratos e ${detailedFacts.length} fatos detalhados.`
+  `Cache gerado em ${outFile} com ${aggregated.aggregatedRecords.length} registros agregados, ${creditorRecords.size} registros por credor em ${creditorChunkYears.length} arquivos, ${contractRows.length} contratos e ${detailedFacts.length} fatos detalhados.`
 );

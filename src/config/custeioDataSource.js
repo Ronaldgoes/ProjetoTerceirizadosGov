@@ -1,3 +1,5 @@
+const CREDITOR_CHUNK_YEARS = [2021, 2022, 2023, 2024, 2025, 2026];
+
 export const CUSTEIO_DATA_SOURCE = {
   mode: "official_cache",
   official: {
@@ -15,5 +17,6 @@ export const CUSTEIO_DATA_SOURCE = {
   },
   cache: {
     aggregatedJson: "/data/custeio-oficial.json",
+    creditorChunks: CREDITOR_CHUNK_YEARS.map((year) => `/data/custeio-oficial-creditor-${year}.json`),
   },
 };

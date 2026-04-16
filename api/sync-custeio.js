@@ -6,6 +6,7 @@ import {
   buildContractsExportUrl,
   buildDetailedFactsFromContracts,
   buildDetailedFactsFromSicopDetail,
+  buildDespesaCredorExportUrl,
   buildDespesaExportUrl,
   buildExtratoSicopUrl,
   buildProcurementModeOptions,
@@ -14,6 +15,7 @@ import {
   decodeCsv,
   getContractReferencePeriod,
   parseContractsCsv,
+  parseDespesaCredorCsvToRecords,
   parseDespesaCsvToRecords,
   parsePeriodKey,
   periodEndDate,
@@ -80,7 +82,7 @@ async function mapWithConcurrency(items, concurrency, worker) {
   return results;
 }
 
-function buildPatch(records, refreshedPeriods, fetchedPeriods, missingPeriods) {
+function buildPatch(records, creditorRecords, refreshedPeriods, fetchedPeriods, missingPeriods) {
   const aggregated = buildAggregatedDataset(records);
 
   return {
@@ -91,6 +93,18 @@ function buildPatch(records, refreshedPeriods, fetchedPeriods, missingPeriods) {
     subelementos: aggregated.subelementos,
     unidades: aggregated.unidades,
     facts: aggregated.facts,
+    creditorFacts: [...creditorRecords.values()].map((record) => [
+      record.year,
+      record.month,
+      record.elementoCode,
+      record.subelementoCode,
+      record.unidadeGestoraCode,
+      record.creditorCode,
+      record.creditorName,
+      record.vlempenhado,
+      record.vlliquidado,
+      record.vlpago,
+    ]),
     availableYears: aggregated.availableYears,
     sourceSummary: {
       requestedPeriodsCount: refreshedPeriods.length,
@@ -195,6 +209,7 @@ export default async function handler(req, res) {
       const fetchedPeriods = [];
       const missingPeriods = [];
       const records = new Map();
+      const creditorRecords = new Map();
 
       for (const value of refreshedPeriods) {
         const { year, month } = parsePeriodKey(value);
@@ -207,10 +222,17 @@ export default async function handler(req, res) {
 
         const buffer = Buffer.from(await response.arrayBuffer());
         parseDespesaCsvToRecords(decodeCsv(buffer), records);
+
+        const creditorResponse = await fetchWithRetry(buildDespesaCredorExportUrl(year, month));
+        if (creditorResponse) {
+          const creditorBuffer = Buffer.from(await creditorResponse.arrayBuffer());
+          parseDespesaCredorCsvToRecords(decodeCsv(creditorBuffer), creditorRecords);
+        }
+
         fetchedPeriods.push(value);
       }
 
-      const patch = buildPatch(records, refreshedPeriods, fetchedPeriods, missingPeriods);
+      const patch = buildPatch(records, creditorRecords, refreshedPeriods, fetchedPeriods, missingPeriods);
       const latestPatchPeriod = patch?.sourceSummary?.latestPeriodAvailable || latestAvailable || currentBrazilPeriod();
 
       try {

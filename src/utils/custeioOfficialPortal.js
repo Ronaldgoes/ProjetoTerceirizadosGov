@@ -1,5 +1,6 @@
 export const API_URL = "https://api-portal-transparencia.apps.sm.okd4.ciasc.sc.gov.br/api";
 export const AGRUPAMENTOS = ["ano", "mes", "elemento", "subelemento", "unidadegestora"];
+export const AGRUPAMENTOS_CREDOR = ["ano", "mes", "elemento", "subelemento", "unidadegestora", "credor"];
 export const SUBELEMENTO_PREFIX = "33";
 
 export function periodKey(year, month) {
@@ -125,6 +126,16 @@ export function buildDespesaExportUrl(year, month) {
   return url.toString();
 }
 
+export function buildDespesaCredorExportUrl(year, month) {
+  const url = new URL(`${API_URL}/despesa/exportcsv`);
+  const value = compactPeriodKey(year, month);
+  url.searchParams.append("anomesinifiltro[]", value);
+  url.searchParams.append("anomesfimfiltro[]", value);
+  AGRUPAMENTOS_CREDOR.forEach((group) => url.searchParams.append("agrupamentos[]", group));
+  url.searchParams.set("indicador", "0");
+  return url.toString();
+}
+
 export function buildContractsExportUrl(startDate, endDate) {
   const url = new URL(`${API_URL}/contratos/exportcsv`);
   url.searchParams.set("origem", "todos");
@@ -189,6 +200,74 @@ export function parseDespesaCsvToRecords(text, accumulator, subelementoPrefix = 
         unidadeGestoraCode: unidadeCode,
         unidadeGestoraName: unidadeName,
         unidadeGestoraLabel: `${unidadeCode} - ${unidadeName}`.trim(),
+        vlempenhado: 0,
+        vlliquidado: 0,
+        vlpago: 0,
+      };
+
+    current.vlempenhado += parseBrazilianNumber(getCell(row, idx, "vlempenhado"));
+    current.vlliquidado += parseBrazilianNumber(getCell(row, idx, "vlliquidado"));
+    current.vlpago += parseBrazilianNumber(getCell(row, idx, "vlpago"));
+    accumulator.set(recordKey, current);
+  });
+}
+
+export function parseDespesaCredorCsvToRecords(text, accumulator, subelementoPrefix = SUBELEMENTO_PREFIX) {
+  const lines = text.split(/\r?\n/).filter(Boolean);
+  if (lines.length < 2) return;
+
+  const header = splitCsvLine(lines[0]);
+  const idx = mapHeader(header);
+
+  lines.slice(1).forEach((line) => {
+    const row = splitCsvLine(line);
+
+    const year = Number(getCell(row, idx, "nuano"));
+    const month = Number(getCell(row, idx, "numes"));
+    const monthLabel = getCell(row, idx, "nmmes").trim();
+    const elementoCode = getCell(row, idx, "cdelemento").trim();
+    const elementoName = getCell(row, idx, "nmelemento").trim();
+    const subelementoCode = getCell(row, idx, "cdsubelemento").trim();
+    const subelementoName = getCell(row, idx, "nmsubelemento").trim();
+    const unidadeCode = getCell(row, idx, "cdunidadegestora").trim() || "00000";
+    const unidadeName = getCell(row, idx, "nmunidadegestora").trim() || "Nao Informado";
+    const creditorCode = getCell(row, idx, "cdcredor").trim();
+    const creditorName = getCell(row, idx, "nmcredor").trim();
+
+    if (!year || !month || !subelementoCode || !subelementoCode.startsWith(subelementoPrefix) || !creditorName) return;
+
+    const recordKey = [
+      year,
+      String(month).padStart(2, "0"),
+      elementoCode,
+      elementoName,
+      subelementoCode,
+      subelementoName,
+      unidadeCode,
+      unidadeName,
+      creditorCode,
+      creditorName,
+    ].join("|");
+
+    const current =
+      accumulator.get(recordKey) ||
+      {
+        year,
+        month,
+        monthLabel,
+        periodKey: periodKey(year, month),
+        elementoCode,
+        elementoName,
+        elementoLabel: `${elementoCode} - ${elementoName}`.trim(),
+        subelementoCode,
+        subelementoName,
+        subelementoLabel: `${subelementoCode} - ${subelementoName}`.trim(),
+        unidadeGestoraCode: unidadeCode,
+        unidadeGestoraName: unidadeName,
+        unidadeGestoraLabel: `${unidadeCode} - ${unidadeName}`.trim(),
+        creditorCode,
+        creditorName,
+        creditorLabel: creditorCode ? `${creditorCode} - ${creditorName}`.trim() : creditorName,
         vlempenhado: 0,
         vlliquidado: 0,
         vlpago: 0,

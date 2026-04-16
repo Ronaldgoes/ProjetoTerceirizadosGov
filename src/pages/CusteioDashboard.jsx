@@ -44,9 +44,46 @@ const TABLE_INCREMENT = 100;
 const VIRTUAL_ALERT_ROW_HEIGHT = 88;
 const VIRTUAL_ALERT_VIEWPORT_HEIGHT = 620;
 const VIRTUAL_TABLE_VIEWPORT_HEIGHT = 620;
-const VIRTUAL_CONCENTRATION_ROW_HEIGHT = 144;
+const VIRTUAL_CONCENTRATION_ROW_HEIGHT = 220;
 const VIRTUAL_PRELIQUIDATION_ROW_HEIGHT = 148;
 const SYNC_REQUEST_TIMEOUT_MS = 12000;
+
+async function loadOfficialCusteioCache(cacheKey = Date.now()) {
+  const cacheResponse = await fetch(`${CUSTEIO_DATA_SOURCE.cache.aggregatedJson}?t=${cacheKey}`);
+  if (!cacheResponse.ok) {
+    throw new Error(`Falha ao carregar ${CUSTEIO_DATA_SOURCE.cache.aggregatedJson}: ${cacheResponse.status}`);
+  }
+
+  const officialCache = await cacheResponse.json();
+  const creditorChunkUrls =
+    officialCache?.creditorChunkYears?.length > 0
+      ? officialCache.creditorChunkYears.map((year) => `/data/custeio-oficial-creditor-${year}.json`)
+      : CUSTEIO_DATA_SOURCE.cache.creditorChunks || [];
+
+  if (!creditorChunkUrls.length) {
+    return {
+      ...officialCache,
+      creditorFacts: Array.isArray(officialCache?.creditorFacts) ? officialCache.creditorFacts : [],
+    };
+  }
+
+  const creditorChunkResponses = await Promise.all(
+    creditorChunkUrls.map((url) => fetch(`${url}?t=${cacheKey}`))
+  );
+
+  const invalidChunk = creditorChunkResponses.find((response) => !response.ok);
+  if (invalidChunk) {
+    throw new Error(`Falha ao carregar base de credores: ${invalidChunk.status}`);
+  }
+
+  const creditorChunkPayloads = await Promise.all(creditorChunkResponses.map((response) => response.json()));
+  const creditorFacts = creditorChunkPayloads.flatMap((payload) => payload?.creditorFacts || []);
+
+  return {
+    ...officialCache,
+    creditorFacts,
+  };
+}
 
 const IPCA_ANUAL_FALLBACK = {
   2021: 10.06,
@@ -961,13 +998,53 @@ function extractDetailedRecords(dataset) {
     .filter(Boolean);
 }
 
+function extractCreditorRecords(dataset) {
+  if (!Array.isArray(dataset?.creditorFacts)) return [];
+
+  return dataset.creditorFacts
+    .map((record, index) => {
+      if (!Array.isArray(record)) return null;
+
+      const [
+        year,
+        month,
+        elementoCode,
+        subelementoCode,
+        unidadeGestoraCode,
+        creditorCode,
+        creditorName,
+        vlempenhado,
+        vlliquidado,
+        vlpago,
+      ] = record;
+
+      if (!year || !month || !subelementoCode || !unidadeGestoraCode || !creditorName) return null;
+
+      return {
+        id: `creditor-${index}`,
+        year: Number(year),
+        month: Number(month),
+        periodKey: `${year}-${String(month).padStart(2, "0")}`,
+        elementoCode: String(elementoCode || "").trim(),
+        subelementoCode: String(subelementoCode || "").trim(),
+        unidadeGestoraCode: String(unidadeGestoraCode || "").trim(),
+        creditorCode: String(creditorCode || "").trim(),
+        creditorName: String(creditorName || "").trim(),
+        creditorLabel: creditorCode ? `${String(creditorCode).trim()} - ${String(creditorName).trim()}` : String(creditorName).trim(),
+        vlempenhado: Number(vlempenhado) || 0,
+        vlliquidado: Number(vlliquidado) || 0,
+        vlpago: Number(vlpago) || 0,
+      };
+    })
+    .filter(Boolean);
+}
+
 function buildCreditorConcentrationRows(records, filters) {
   return groupByUgSubelemento(records, filters);
 }
 
 function buildCreditorRankingLookup(records) {
   const byPair = new Map();
-  const byUg = new Map();
 
   (Array.isArray(records) ? records : []).forEach((record) => {
     const ugCode = String(record?.unidadeGestoraCode || "").trim();
@@ -976,39 +1053,46 @@ function buildCreditorRankingLookup(records) {
 
     if (!ugCode || !creditorLabel) return;
 
-    const metricValue = Math.max(
-      Number(record?.vlpago) || 0,
-      Number(record?.vlliquidado) || 0,
-      Number(record?.vlempenhado) || 0,
-      Number(record?.value) || 0
-    );
-
     const register = (map, key) => {
       const currentGroup = map.get(key) || new Map();
-      currentGroup.set(creditorLabel, (currentGroup.get(creditorLabel) || 0) + metricValue);
+      const currentCreditor = currentGroup.get(creditorLabel) || {
+        label: creditorLabel,
+        empenhado: 0,
+        liquidado: 0,
+        pago: 0,
+        total: 0,
+      };
+
+      currentCreditor.empenhado += Number(record?.vlempenhado) || 0;
+      currentCreditor.liquidado += Number(record?.vlliquidado) || 0;
+      currentCreditor.pago += Number(record?.vlpago) || 0;
+      currentCreditor.total += Math.max(
+        Number(record?.vlpago) || 0,
+        Number(record?.vlliquidado) || 0,
+        Number(record?.vlempenhado) || 0,
+        Number(record?.value) || 0
+      );
+
+      currentGroup.set(creditorLabel, currentCreditor);
       map.set(key, currentGroup);
     };
 
     if (subelementoCode) {
       register(byPair, `${ugCode}-${subelementoCode}`);
     }
-    register(byUg, ugCode);
   });
 
   const finalize = (map) =>
     new Map(
       [...map.entries()].map(([key, creditorMap]) => [
         key,
-        [...creditorMap.entries()]
-          .map(([label, total]) => ({ label, total }))
-          .sort((a, b) => b.total - a.total)
-          .slice(0, 3),
+        [...creditorMap.values()]
+          .sort((a, b) => b.total - a.total),
       ])
     );
 
   return {
     byPair: finalize(byPair),
-    byUg: finalize(byUg),
   };
 }
 
@@ -1020,8 +1104,8 @@ function getConcentrationMetricValue(row, metricKey) {
 
 function getCreditorMetricValue(creditor, metricKey) {
   const fallbackTotal = Number(creditor?.total) || 0;
-  if (metricKey === "vlliquidado") return Number(creditor?.liquidado) || 0;
-  if (metricKey === "vlpago") return Number(creditor?.pago) || 0;
+  if (metricKey === "vlliquidado") return Number(creditor?.liquidado) || fallbackTotal;
+  if (metricKey === "vlpago") return Number(creditor?.pago) || fallbackTotal;
   return Number(creditor?.empenhado) || fallbackTotal;
 }
 
@@ -1029,6 +1113,17 @@ function resolveDisplayedCredores(allCredores, concentrationMode) {
   const sortedCredores = Array.isArray(allCredores) ? allCredores : [];
   if (concentrationMode === "all") return sortedCredores;
   return sortedCredores.slice(0, Number(concentrationMode));
+}
+
+function matchesConcentrationMode(creditorCount, concentrationMode) {
+  if (!Number.isFinite(creditorCount) || creditorCount <= 0) return false;
+  if (concentrationMode === "all") return creditorCount > 3;
+  return creditorCount === Number(concentrationMode);
+}
+
+function getConcentrationModeSummary(concentrationMode) {
+  if (concentrationMode === "all") return "Faixa 4+ credores";
+  return `Faixa ${concentrationMode} credor${concentrationMode === "1" ? "" : "es"}`;
 }
 
 function resolveConcentrationBadge(percentual) {
@@ -3008,21 +3103,19 @@ const ConcentrationTableRow = memo(function ConcentrationTableRow({
           <strong>{row.ugDescricao}</strong>
           <span className="bi-alert-impact">{row.subelementoDescricao}</span>
         </div>
-        <span>{row.credoresCount || displayedCredores.length || 0}</span>
+        <span>{row.allCredores?.length || row.credoresCount || displayedCredores.length || 0}</span>
         <span>{topNLabel}</span>
         <span>{fmtPercent(concentrationPercent)}</span>
         <span>{fmtCurrency(totalValue)}</span>
-        <span className="bi-cell-stack">
+        <span className="bi-cell-stack bi-concentration-creditors">
           {displayedCredores.length > 0 ? (
             <>
-              {displayedCredores.slice(0, concentrationMode === "all" ? 4 : displayedCredores.length).map((creditor) => (
-                <small key={`${row.key}-credor-${creditor.label}`}>
-                  {creditor.label}
+              {displayedCredores.map((creditor) => (
+                <small key={`${row.key}-credor-${creditor.label}`} className="bi-concentration-creditor-entry">
+                  <span className="bi-concentration-creditor-name">{creditor.label}</span>
+                  <span className="bi-concentration-creditor-value">{fmtCurrency(getCreditorMetricValue(creditor, selectedMetric))}</span>
                 </small>
               ))}
-              {concentrationMode === "all" && displayedCredores.length > 4 ? (
-                <small>{`+ ${displayedCredores.length - 4} credor(es)`}</small>
-              ) : null}
             </>
           ) : (
             <small>Sem credores detalhados</small>
@@ -3073,14 +3166,16 @@ const CreditorConcentrationTable = memo(function CreditorConcentrationTable({
   onSelectConcentrationMode,
   selectedMetric,
 }) {
+  const modeSummary = getConcentrationModeSummary(concentrationMode);
+
   if (rows.length === 0) {
     return (
       <section className="bi-panel">
         <div className="bi-panel-header">
           <h3>Despesas concentradas em poucos credores</h3>
-          <span>Sem dados para os filtros selecionados</span>
+          <span>{`Sem dados para ${modeSummary.toLowerCase()}`}</span>
         </div>
-        <div className="empty-state">Sem dados para os filtros selecionados</div>
+        <div className="empty-state">{`Sem dados para ${modeSummary.toLowerCase()}`}</div>
       </section>
     );
   }
@@ -3114,12 +3209,12 @@ const CreditorConcentrationTable = memo(function CreditorConcentrationTable({
           <div className="bi-alert-summary-mini">
             <span>{rows.length} combinações únicas analisadas</span>
             <span>•</span>
-            <span>{`Leitura Top ${concentrationMode === "all" ? "Todos" : concentrationMode}`}</span>
+            <span>{modeSummary}</span>
           </div>
         </div>
       </div>
 
-      <div className="bi-alert-table">
+        <div className="bi-alert-table">
         <div className="bi-alert-row bi-alert-head bi-alert-row-concentration">
           <span>UG / Subelemento</span>
           <span>Credores</span>
@@ -3128,14 +3223,14 @@ const CreditorConcentrationTable = memo(function CreditorConcentrationTable({
           <span>Total</span>
           <span>Principais Credores</span>
         </div>
-        <VirtualTableRows
-          rows={rows}
-          rowComponent={ConcentrationTableRow}
-          rowHeight={VIRTUAL_CONCENTRATION_ROW_HEIGHT}
-          rowProps={{ concentrationMode, selectedMetric }}
-        />
-      </div>
-    </section>
+          <VirtualTableRows
+            rows={rows}
+            rowComponent={ConcentrationTableRow}
+            rowHeight={concentrationMode === "all" ? VIRTUAL_CONCENTRATION_ROW_HEIGHT : 160}
+            rowProps={{ concentrationMode, selectedMetric }}
+          />
+        </div>
+      </section>
   );
 });
 
@@ -3559,12 +3654,7 @@ export default function CusteioDashboard() {
       setStatus("Carregando base oficial publicada...");
 
       const storedPatch = loadCusteioSyncPatch();
-      const cacheResponse = await fetch(`${CUSTEIO_DATA_SOURCE.cache.aggregatedJson}?t=${Date.now()}`);
-      if (!cacheResponse.ok) {
-        throw new Error(`Falha ao carregar ${CUSTEIO_DATA_SOURCE.cache.aggregatedJson}: ${cacheResponse.status}`);
-      }
-
-      const officialCache = await cacheResponse.json();
+      const officialCache = await loadOfficialCusteioCache(Date.now());
       const initialDataset = storedPatch ? mergeCusteioDataset(officialCache, storedPatch) : officialCache;
 
       setDataset(initialDataset);
@@ -3772,6 +3862,7 @@ export default function CusteioDashboard() {
   }, [dataset, dimensionLookup]);
 
   const detailedRecords = useMemo(() => extractDetailedRecords(dataset), [dataset]);
+  const creditorRecords = useMemo(() => extractCreditorRecords(dataset), [dataset]);
 
   const procurementModeOptions = useMemo(() => {
     const datasetOptions = Array.isArray(dataset?.procurementModeOptions)
@@ -4127,9 +4218,29 @@ export default function CusteioDashboard() {
     [visibleRecords, selectedMetric]
   );
 
+  const filteredCreditorRecords = useMemo(() => {
+    if (!creditorRecords.length) return [];
+
+    return creditorRecords.filter((record) => {
+      const yearOk = activeFilters.selectedYear === "all" || record.year === Number(activeFilters.selectedYear);
+      const elementoOk =
+        activeFilters.selectedElementos.length === 0 || activeFilters.selectedElementos.includes(record.elementoCode);
+      const subelementoOk =
+        activeFilters.selectedSubelementos.length === 0 || activeFilters.selectedSubelementos.includes(record.subelementoCode);
+      const unidadeOk =
+        activeFilters.selectedUnidades.length === 0 || activeFilters.selectedUnidades.includes(record.unidadeGestoraCode);
+      const periodStartOk =
+        activeFilters.periodStart === "all" || !record.periodKey || record.periodKey >= activeFilters.periodStart;
+      const periodEndOk =
+        activeFilters.periodEnd === "all" || !record.periodKey || record.periodKey <= activeFilters.periodEnd;
+
+      return yearOk && elementoOk && subelementoOk && unidadeOk && periodStartOk && periodEndOk;
+    });
+  }, [activeFilters, creditorRecords]);
+
   const concentrationCreditorLookup = useMemo(
-    () => buildCreditorRankingLookup(filteredDetailedRecords),
-    [filteredDetailedRecords]
+    () => buildCreditorRankingLookup(filteredCreditorRecords),
+    [filteredCreditorRecords]
   );
 
   const creditorConcentrationRows = useMemo(
@@ -4138,15 +4249,20 @@ export default function CusteioDashboard() {
 
       return buildCreditorConcentrationRows(visibleRecords, activeFilters).map((row) => ({
         ...row,
-        allCredores:
-          concentrationCreditorLookup.byPair.get(`${row.ug}-${row.subelemento}`)
-          || concentrationCreditorLookup.byUg.get(row.ug)
-          || row.allCredores
-          || [],
+        allCredores: concentrationCreditorLookup.byPair.get(`${row.ug}-${row.subelemento}`) || [],
       }));
     },
     [activeFilters, activeTab, concentrationCreditorLookup, visibleRecords]
   );
+
+  const filteredCreditorConcentrationRows = useMemo(() => {
+    if (activeTab !== "creditorConcentration") return [];
+
+    return creditorConcentrationRows.filter((row) => {
+      const creditorCount = row.allCredores?.length || row.credoresCount || 0;
+      return matchesConcentrationMode(creditorCount, concentrationMode);
+    });
+  }, [activeTab, concentrationMode, creditorConcentrationRows]);
 
   const missingContractRows = useMemo(
     () => (activeTab === "withoutContract" ? buildMissingContractRows(filteredDetailedRecords) : []),
@@ -6112,12 +6228,12 @@ export default function CusteioDashboard() {
             variant="section"
           >
             <section className="bi-grid bi-grid-single">
-              <CreditorConcentrationTable
-                rows={creditorConcentrationRows}
-                concentrationMode={concentrationMode}
-                onSelectConcentrationMode={setConcentrationMode}
-                selectedMetric={selectedMetric}
-              />
+                <CreditorConcentrationTable
+                  rows={filteredCreditorConcentrationRows}
+                  concentrationMode={concentrationMode}
+                  onSelectConcentrationMode={setConcentrationMode}
+                  selectedMetric={selectedMetric}
+                />
             </section>
           </ExportableBlock>
         )}
@@ -6229,4 +6345,3 @@ export default function CusteioDashboard() {
     </div>
   );
 }
-

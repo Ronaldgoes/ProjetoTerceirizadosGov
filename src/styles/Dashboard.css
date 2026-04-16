@@ -2887,6 +2887,39 @@
   word-break: break-word;
 }
 
+.bi-concentration-creditor-entry {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding-bottom: 8px;
+  margin-bottom: 8px;
+  border-bottom: 1px solid rgba(37, 99, 235, 0.18);
+}
+
+.bi-concentration-creditor-entry:last-child {
+  margin-bottom: 0;
+  padding-bottom: 0;
+  border-bottom: 0;
+}
+
+.bi-concentration-creditor-name {
+  color: #CBD5E1;
+  font-weight: 600;
+}
+
+.bi-concentration-creditor-value {
+  color: #7DD3FC;
+  font-size: 0.82rem;
+}
+
+.bi-concentration-creditors {
+  max-height: 150px;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding-right: 8px;
+  align-self: stretch;
+}
+
 .bi-concentration-mode {
   display: flex;
   flex-direction: column;

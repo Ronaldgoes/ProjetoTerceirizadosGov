@@ -22,6 +22,22 @@ function sortFacts(a, b) {
   return String(a[4]).localeCompare(String(b[4]));
 }
 
+function sortCreditorFacts(a, b) {
+  const periodOrder = toPeriodKey(a[0], a[1]).localeCompare(toPeriodKey(b[0], b[1]));
+  if (periodOrder !== 0) return periodOrder;
+
+  const elementoOrder = String(a[2]).localeCompare(String(b[2]));
+  if (elementoOrder !== 0) return elementoOrder;
+
+  const subelementoOrder = String(a[3]).localeCompare(String(b[3]));
+  if (subelementoOrder !== 0) return subelementoOrder;
+
+  const ugOrder = String(a[4]).localeCompare(String(b[4]));
+  if (ugOrder !== 0) return ugOrder;
+
+  return String(a[5]).localeCompare(String(b[5]));
+}
+
 function mergeDimensionItems(baseItems = [], deltaItems = []) {
   const merged = new Map(baseItems.map((item) => [String(item.code), item]));
   deltaItems.forEach((item) => {
@@ -117,6 +133,11 @@ export function mergeCusteioDataset(baseDataset, patch) {
     ...patch.facts,
   ].sort(sortFacts);
 
+  const nextCreditorFacts = [
+    ...((baseDataset.creditorFacts || []).filter(([year, month]) => !refreshedPeriods.has(toPeriodKey(year, month)))),
+    ...((patch.creditorFacts || [])),
+  ].sort(sortCreditorFacts);
+
   const periodLabels = {
     ...(baseDataset.periodLabels || {}),
     ...(patch.periodLabels || {}),
@@ -137,6 +158,7 @@ export function mergeCusteioDataset(baseDataset, patch) {
     subelementos: mergeDimensionItems(baseDataset.subelementos, patch.subelementos),
     unidades: mergeDimensionItems(baseDataset.unidades, patch.unidades),
     facts: nextFacts,
+    creditorFacts: nextCreditorFacts,
     ipcaMonthly: {
       ...(baseDataset.ipcaMonthly || {}),
       ...(patch.ipcaMonthly || {}),
