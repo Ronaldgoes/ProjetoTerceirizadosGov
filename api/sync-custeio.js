@@ -26,6 +26,7 @@ const CACHE_FILE = path.join(process.cwd(), "public", "data", "custeio-oficial.j
 const DETAIL_CONCURRENCY = 6;
 const CONTRACTS_HISTORY_MONTHS = 18;
 const CONTRACTS_LOOKBACK_MONTHS = 12;
+let activeSyncJob = null;
 
 function json(res, statusCode, body) {
   res.status(statusCode).setHeader("Content-Type", "application/json");
@@ -181,65 +182,76 @@ export default async function handler(req, res) {
     return json(res, 405, { ok: false, error: "Metodo nao permitido." });
   }
 
+  if (activeSyncJob) {
+    return json(res, 200, { ok: true, inProgress: true, cachePatch: null });
+  }
+
   try {
-    const cacheRaw = await fs.readFile(CACHE_FILE, "utf-8");
-    const cache = JSON.parse(cacheRaw);
-    const latestAvailable = cache?.sourceSummary?.latestPeriodAvailable || null;
-    const refreshedPeriods = buildPeriodsToRefresh(latestAvailable);
-    const fetchedPeriods = [];
-    const missingPeriods = [];
-    const records = new Map();
+    activeSyncJob = (async () => {
+      const cacheRaw = await fs.readFile(CACHE_FILE, "utf-8");
+      const cache = JSON.parse(cacheRaw);
+      const latestAvailable = cache?.sourceSummary?.latestPeriodAvailable || null;
+      const refreshedPeriods = buildPeriodsToRefresh(latestAvailable);
+      const fetchedPeriods = [];
+      const missingPeriods = [];
+      const records = new Map();
 
-    for (const value of refreshedPeriods) {
-      const { year, month } = parsePeriodKey(value);
-      const response = await fetchWithRetry(buildDespesaExportUrl(year, month));
+      for (const value of refreshedPeriods) {
+        const { year, month } = parsePeriodKey(value);
+        const response = await fetchWithRetry(buildDespesaExportUrl(year, month));
 
-      if (!response) {
-        missingPeriods.push(value);
-        continue;
+        if (!response) {
+          missingPeriods.push(value);
+          continue;
+        }
+
+        const buffer = Buffer.from(await response.arrayBuffer());
+        parseDespesaCsvToRecords(decodeCsv(buffer), records);
+        fetchedPeriods.push(value);
       }
 
-      const buffer = Buffer.from(await response.arrayBuffer());
-      parseDespesaCsvToRecords(decodeCsv(buffer), records);
-      fetchedPeriods.push(value);
-    }
+      const patch = buildPatch(records, refreshedPeriods, fetchedPeriods, missingPeriods);
+      const latestPatchPeriod = patch?.sourceSummary?.latestPeriodAvailable || latestAvailable || currentBrazilPeriod();
 
-    const patch = buildPatch(records, refreshedPeriods, fetchedPeriods, missingPeriods);
-    const latestPatchPeriod = patch?.sourceSummary?.latestPeriodAvailable || latestAvailable || currentBrazilPeriod();
+      try {
+        const contractsPatch = await buildContractsPatch(cache, latestPatchPeriod);
+        patch.detailedFacts = contractsPatch.detailedFacts;
+        patch.procurementModeOptions = contractsPatch.procurementModeOptions;
+        patch.contractsSourceSummary = contractsPatch.contractsSourceSummary;
+      } catch (error) {
+        patch.detailedFacts = cache?.detailedFacts || [];
+        patch.procurementModeOptions = cache?.procurementModeOptions || [];
+        patch.contractsSourceSummary = {
+          ...(cache?.contractsSourceSummary || {}),
+          lastError: error instanceof Error ? error.message : "Falha ao atualizar contratos oficiais.",
+        };
+      }
 
-    try {
-      const contractsPatch = await buildContractsPatch(cache, latestPatchPeriod);
-      patch.detailedFacts = contractsPatch.detailedFacts;
-      patch.procurementModeOptions = contractsPatch.procurementModeOptions;
-      patch.contractsSourceSummary = contractsPatch.contractsSourceSummary;
-    } catch (error) {
-      patch.detailedFacts = cache?.detailedFacts || [];
-      patch.procurementModeOptions = cache?.procurementModeOptions || [];
-      patch.contractsSourceSummary = {
-        ...(cache?.contractsSourceSummary || {}),
-        lastError: error instanceof Error ? error.message : "Falha ao atualizar contratos oficiais.",
-      };
-    }
+      try {
+        const ipcaSeries = await fetchIpcaSeries();
+        patch.ipcaMonthly = ipcaSeries.monthly;
+        patch.ipcaAnnual = ipcaSeries.annual;
+        patch.ipcaSourceSummary = ipcaSeries.sourceSummary;
+      } catch (error) {
+        patch.ipcaMonthly = cache?.ipcaMonthly || {};
+        patch.ipcaAnnual = cache?.ipcaAnnual || {};
+        patch.ipcaSourceSummary = {
+          ...(cache?.ipcaSourceSummary || {}),
+          lastError: error instanceof Error ? error.message : "Falha ao atualizar IPCA automaticamente.",
+        };
+      }
 
-    try {
-      const ipcaSeries = await fetchIpcaSeries();
-      patch.ipcaMonthly = ipcaSeries.monthly;
-      patch.ipcaAnnual = ipcaSeries.annual;
-      patch.ipcaSourceSummary = ipcaSeries.sourceSummary;
-    } catch (error) {
-      patch.ipcaMonthly = cache?.ipcaMonthly || {};
-      patch.ipcaAnnual = cache?.ipcaAnnual || {};
-      patch.ipcaSourceSummary = {
-        ...(cache?.ipcaSourceSummary || {}),
-        lastError: error instanceof Error ? error.message : "Falha ao atualizar IPCA automaticamente.",
-      };
-    }
+      return patch;
+    })();
 
+    const patch = await activeSyncJob;
     return json(res, 200, { ok: true, cachePatch: patch });
   } catch (error) {
     return json(res, 500, {
       ok: false,
       error: error instanceof Error ? error.message : "Falha ao sincronizar custeio.",
     });
+  } finally {
+    activeSyncJob = null;
   }
 }

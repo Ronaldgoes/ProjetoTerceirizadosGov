@@ -12,7 +12,7 @@ import { CUSTEIO_DATA_CONTRACT } from "../config/custeioDataContract";
 import { CUSTEIO_DATA_SOURCE } from "../config/custeioDataSource";
 import { useAuth } from "../hooks/useAuth";
 import { getPreLiquidacao, groupByUgSubelemento } from "../utils/groupCusteio";
-import { loadCusteioSyncPatch, mergeCusteioDataset, saveCusteioSyncPatch } from "../utils/custeioSyncSession";
+import { loadCusteioSyncPatch, mergeCusteioDataset, requestCusteioSync } from "../utils/custeioSyncSession";
 import { buildMatrixRows as buildMatrixRowsHelper } from "../utils/matrix";
 import { searchByText } from "../utils/searchCusteio";
 import { matchesSearchQuery, normalizeText } from "../utils/textHelpers";
@@ -32,14 +32,9 @@ const PAGE_TABS = [
   { key: "trends", label: "Ranking" },
   { key: "matrix", label: "Matriz" },
   { key: "ugRanking", label: "Evolução" },
-  { key: "alerts", label: "Alertas" },
   { key: "creditorConcentration", label: "Concentração" },
-  { key: "withoutContract", label: "Sem Contrato" },
   { key: "preLiquidationPayments", label: "Pag. Pré-Liquidação" },
-  { key: "itemServices", label: "Itens/Serviços" },
-  { key: "itemVariation", label: "Variação Itens" },
-  { key: "procurementModes", label: "Modalidades" },
-  { key: "contracts", label: "Contratos" },
+  { key: "alerts", label: "Alertas" },
 ];
 
 const MONTH_SHORT_LABELS = ["Jan", "Fev", "Mar", "Abr", "Mai", "Jun", "Jul", "Ago", "Set", "Out", "Nov", "Dez"];
@@ -49,7 +44,7 @@ const TABLE_INCREMENT = 100;
 const VIRTUAL_ALERT_ROW_HEIGHT = 88;
 const VIRTUAL_ALERT_VIEWPORT_HEIGHT = 620;
 const VIRTUAL_TABLE_VIEWPORT_HEIGHT = 620;
-const VIRTUAL_CONCENTRATION_ROW_HEIGHT = 108;
+const VIRTUAL_CONCENTRATION_ROW_HEIGHT = 144;
 const VIRTUAL_PRELIQUIDATION_ROW_HEIGHT = 148;
 const SYNC_REQUEST_TIMEOUT_MS = 12000;
 
@@ -970,6 +965,78 @@ function buildCreditorConcentrationRows(records, filters) {
   return groupByUgSubelemento(records, filters);
 }
 
+function buildCreditorRankingLookup(records) {
+  const byPair = new Map();
+  const byUg = new Map();
+
+  (Array.isArray(records) ? records : []).forEach((record) => {
+    const ugCode = String(record?.unidadeGestoraCode || "").trim();
+    const subelementoCode = String(record?.subelementoCode || "").trim();
+    const creditorLabel = String(record?.creditorLabel || record?.creditorName || "").trim();
+
+    if (!ugCode || !creditorLabel) return;
+
+    const metricValue = Math.max(
+      Number(record?.vlpago) || 0,
+      Number(record?.vlliquidado) || 0,
+      Number(record?.vlempenhado) || 0,
+      Number(record?.value) || 0
+    );
+
+    const register = (map, key) => {
+      const currentGroup = map.get(key) || new Map();
+      currentGroup.set(creditorLabel, (currentGroup.get(creditorLabel) || 0) + metricValue);
+      map.set(key, currentGroup);
+    };
+
+    if (subelementoCode) {
+      register(byPair, `${ugCode}-${subelementoCode}`);
+    }
+    register(byUg, ugCode);
+  });
+
+  const finalize = (map) =>
+    new Map(
+      [...map.entries()].map(([key, creditorMap]) => [
+        key,
+        [...creditorMap.entries()]
+          .map(([label, total]) => ({ label, total }))
+          .sort((a, b) => b.total - a.total)
+          .slice(0, 3),
+      ])
+    );
+
+  return {
+    byPair: finalize(byPair),
+    byUg: finalize(byUg),
+  };
+}
+
+function getConcentrationMetricValue(row, metricKey) {
+  if (metricKey === "vlliquidado") return Number(row?.liquidado) || 0;
+  if (metricKey === "vlpago") return Number(row?.pago) || 0;
+  return Number(row?.empenhado) || 0;
+}
+
+function getCreditorMetricValue(creditor, metricKey) {
+  const fallbackTotal = Number(creditor?.total) || 0;
+  if (metricKey === "vlliquidado") return Number(creditor?.liquidado) || 0;
+  if (metricKey === "vlpago") return Number(creditor?.pago) || 0;
+  return Number(creditor?.empenhado) || fallbackTotal;
+}
+
+function resolveDisplayedCredores(allCredores, concentrationMode) {
+  const sortedCredores = Array.isArray(allCredores) ? allCredores : [];
+  if (concentrationMode === "all") return sortedCredores;
+  return sortedCredores.slice(0, Number(concentrationMode));
+}
+
+function resolveConcentrationBadge(percentual) {
+  if (percentual >= 80) return "ALTO";
+  if (percentual >= 50) return "MÉDIO";
+  return "BAIXO";
+}
+
 function buildMissingContractRows(records) {
   return records
     .filter((record) => !record.hasContract && !record.isFundSupply)
@@ -1162,6 +1229,14 @@ function buildComparisonMetaMap({ records, metricKey, startPeriodKey, endPeriodK
 
 function buildPreLiquidationRows(records) {
   return getPreLiquidacao(records);
+}
+
+function isPaymentBeforeLiquidation(record) {
+  const paymentDate = parseFlexibleDate(record?.paymentDate);
+  const liquidationDate = parseFlexibleDate(record?.liquidationDate);
+
+  if (!paymentDate || !liquidationDate) return false;
+  return paymentDate.getTime() < liquidationDate.getTime();
 }
 
 function summarizeDetailedRecords(records) {
@@ -2887,6 +2962,7 @@ const VirtualTableRows = memo(function VirtualTableRows({
   rowComponent,
   rowHeight,
   viewportHeight = VIRTUAL_TABLE_VIEWPORT_HEIGHT,
+  rowProps = {},
 }) {
   if (!rows.length) return null;
 
@@ -2899,29 +2975,59 @@ const VirtualTableRows = memo(function VirtualTableRows({
         rowComponent={rowComponent}
         rowCount={rows.length}
         rowHeight={rowHeight}
-        rowProps={{ rows }}
+        rowProps={{ rows, ...rowProps }}
         style={{ height: viewportHeight }}
       />
     </div>
   );
 });
 
-const ConcentrationTableRow = memo(function ConcentrationTableRow({ index, rows, style }) {
+const ConcentrationTableRow = memo(function ConcentrationTableRow({
+  index,
+  rows,
+  style,
+  concentrationMode = "1",
+  selectedMetric = "vlempenhado",
+}) {
   const row = rows[index];
   if (!row) return null;
+  const displayedCredores = resolveDisplayedCredores(row.allCredores, concentrationMode);
+  const totalValue = getConcentrationMetricValue(row, selectedMetric);
+  const topNValue = displayedCredores.reduce((acc, creditor) => acc + getCreditorMetricValue(creditor, selectedMetric), 0);
+  const concentrationPercent = totalValue > 0 ? (topNValue / totalValue) * 100 : 0;
+  const badgeLabel = resolveConcentrationBadge(concentrationPercent);
+  const topNLabel = concentrationMode === "all" ? "Todos" : concentrationMode;
 
   return (
     <div style={style} className="bi-virtual-list-item">
       <div key={row.key} className="bi-alert-row bi-alert-row-concentration">
         <div className="bi-alert-category">
+          <span className={`bi-alert-badge ${badgeLabel === "ALTO" ? "warning" : badgeLabel === "MÉDIO" ? "high" : "critical"}`}>
+            {badgeLabel}
+          </span>
           <strong>{row.ugDescricao}</strong>
           <span className="bi-alert-impact">{row.subelementoDescricao}</span>
         </div>
-        <span>{row.ug || "--"}</span>
-        <span>{row.subelemento || "--"}</span>
-        <span>{fmtCurrency(row.empenhado)}</span>
-        <span>{fmtCurrency(row.liquidado)}</span>
-        <span>{fmtCurrency(row.pago)}</span>
+        <span>{row.credoresCount || displayedCredores.length || 0}</span>
+        <span>{topNLabel}</span>
+        <span>{fmtPercent(concentrationPercent)}</span>
+        <span>{fmtCurrency(totalValue)}</span>
+        <span className="bi-cell-stack">
+          {displayedCredores.length > 0 ? (
+            <>
+              {displayedCredores.slice(0, concentrationMode === "all" ? 4 : displayedCredores.length).map((creditor) => (
+                <small key={`${row.key}-credor-${creditor.label}`}>
+                  {creditor.label}
+                </small>
+              ))}
+              {concentrationMode === "all" && displayedCredores.length > 4 ? (
+                <small>{`+ ${displayedCredores.length - 4} credor(es)`}</small>
+              ) : null}
+            </>
+          ) : (
+            <small>Sem credores detalhados</small>
+          )}
+        </span>
       </div>
     </div>
   );
@@ -2961,12 +3067,17 @@ const PreLiquidationTableRow = memo(function PreLiquidationTableRow({ index, row
   );
 });
 
-const CreditorConcentrationTable = memo(function CreditorConcentrationTable({ rows }) {
+const CreditorConcentrationTable = memo(function CreditorConcentrationTable({
+  rows,
+  concentrationMode,
+  onSelectConcentrationMode,
+  selectedMetric,
+}) {
   if (rows.length === 0) {
     return (
       <section className="bi-panel">
         <div className="bi-panel-header">
-          <h3>Concentração por UG e subelemento</h3>
+          <h3>Despesas concentradas em poucos credores</h3>
           <span>Sem dados para os filtros selecionados</span>
         </div>
         <div className="empty-state">Sem dados para os filtros selecionados</div>
@@ -2976,13 +3087,34 @@ const CreditorConcentrationTable = memo(function CreditorConcentrationTable({ ro
 
   return (
     <section className="bi-panel">
+      <div className="bi-concentration-mode">
+        <span className="bi-concentration-mode-label">Nível de Concentração</span>
+        <div className="bi-toggle-group">
+          {[
+            { value: "1", label: "1 CREDOR" },
+            { value: "2", label: "2 CREDORES" },
+            { value: "3", label: "3 CREDORES" },
+            { value: "all", label: "TODOS OS CREDORES" },
+          ].map((option) => (
+            <button
+              key={option.value}
+              type="button"
+              className={concentrationMode === option.value ? "is-active" : ""}
+              onClick={() => onSelectConcentrationMode(option.value)}
+            >
+              {option.label}
+            </button>
+          ))}
+        </div>
+      </div>
+
       <div className="bi-panel-header">
         <div>
-          <h3>Concentração por UG e subelemento</h3>
+          <h3>Despesas concentradas em poucos credores</h3>
           <div className="bi-alert-summary-mini">
             <span>{rows.length} combinações únicas analisadas</span>
             <span>•</span>
-            <span>Valores consolidados no período ativo</span>
+            <span>{`Leitura Top ${concentrationMode === "all" ? "Todos" : concentrationMode}`}</span>
           </div>
         </div>
       </div>
@@ -2990,16 +3122,17 @@ const CreditorConcentrationTable = memo(function CreditorConcentrationTable({ ro
       <div className="bi-alert-table">
         <div className="bi-alert-row bi-alert-head bi-alert-row-concentration">
           <span>UG / Subelemento</span>
-          <span>UG</span>
-          <span>Subelemento</span>
-          <span>Empenhado</span>
-          <span>Liquidado</span>
-          <span>Pago</span>
+          <span>Credores</span>
+          <span>Top N</span>
+          <span>% Concentração</span>
+          <span>Total</span>
+          <span>Principais Credores</span>
         </div>
         <VirtualTableRows
           rows={rows}
           rowComponent={ConcentrationTableRow}
           rowHeight={VIRTUAL_CONCENTRATION_ROW_HEIGHT}
+          rowProps={{ concentrationMode, selectedMetric }}
         />
       </div>
     </section>
@@ -3033,7 +3166,7 @@ const PreLiquidationPaymentTable = memo(function PreLiquidationPaymentTable({ ro
     <section className="bi-panel">
       <div className="bi-panel-header">
         <div>
-          <h3>Pagamentos com liquidação posterior ou ausente</h3>
+          <h3>Pagamentos realizados antes da liquidação</h3>
           <div className="bi-alert-summary-mini">
             <span>{rows.length} registros localizados</span>
             <span>•</span>
@@ -3358,6 +3491,7 @@ export default function CusteioDashboard() {
   const [selectedRankingPeriod, setSelectedRankingPeriod] = useState(null);
   const [selectedEvolutionUg, setSelectedEvolutionUg] = useState(null);
   const [selectedEvolutionSubelement, setSelectedEvolutionSubelement] = useState(null);
+  const [concentrationMode, setConcentrationMode] = useState("1");
   const [evolutionType, setEvolutionType] = useState("monthly");
   const [evolutionView, setEvolutionView] = useState("ug");
   const ugQuantity = 10; // Fixed at 10
@@ -3441,28 +3575,9 @@ export default function CusteioDashboard() {
       let syncPatch = null;
 
       try {
-        const controller = new AbortController();
-        const timeoutId = window.setTimeout(() => controller.abort(), SYNC_REQUEST_TIMEOUT_MS);
-        let syncResponse;
-        try {
-          syncResponse = await fetch("/api/sync-custeio", {
-            method: "POST",
-            signal: controller.signal,
-          });
-        } finally {
-          window.clearTimeout(timeoutId);
-        }
-
-        if (syncResponse.ok) {
-          const syncResult = await syncResponse.json();
-          if (syncResult.ok) {
-            syncCompleted = true;
-            if (syncResult.cachePatch) {
-              syncPatch = syncResult.cachePatch;
-              saveCusteioSyncPatch(syncPatch);
-            }
-          }
-        }
+        const syncResult = await requestCusteioSync(SYNC_REQUEST_TIMEOUT_MS);
+        syncCompleted = Boolean(syncResult?.ok);
+        syncPatch = syncResult?.cachePatch || null;
       } catch {
         syncCompleted = false;
       }
@@ -4012,17 +4127,25 @@ export default function CusteioDashboard() {
     [visibleRecords, selectedMetric]
   );
 
-  const concentrationSourceRecords = useMemo(
-    () => (visibleRecords.length > 0 ? visibleRecords : filteredDetailedRecords),
-    [filteredDetailedRecords, visibleRecords]
+  const concentrationCreditorLookup = useMemo(
+    () => buildCreditorRankingLookup(filteredDetailedRecords),
+    [filteredDetailedRecords]
   );
 
   const creditorConcentrationRows = useMemo(
-    () =>
-      activeTab === "creditorConcentration"
-        ? buildCreditorConcentrationRows(concentrationSourceRecords, activeFilters)
-        : [],
-    [activeFilters, activeTab, concentrationSourceRecords]
+    () => {
+      if (activeTab !== "creditorConcentration") return [];
+
+      return buildCreditorConcentrationRows(visibleRecords, activeFilters).map((row) => ({
+        ...row,
+        allCredores:
+          concentrationCreditorLookup.byPair.get(`${row.ug}-${row.subelemento}`)
+          || concentrationCreditorLookup.byUg.get(row.ug)
+          || row.allCredores
+          || [],
+      }));
+    },
+    [activeFilters, activeTab, concentrationCreditorLookup, visibleRecords]
   );
 
   const missingContractRows = useMemo(
@@ -4031,28 +4154,31 @@ export default function CusteioDashboard() {
   );
 
   const preLiquidationPaymentRows = useMemo(
-    () => (
-      activeTab === "preLiquidationPayments"
-        ? buildPreLiquidationRows(filteredDetailedRecords).map((row) => {
-            const fallback =
-              preLiquidationDetailLookup.get(String(row.nutitulo || "").trim())
-              || preLiquidationDetailLookup.get(String(row.contractNumber || "").trim());
-            return {
-              ...row,
-              subelementoCode: row.subelementoCode || fallback?.subelementoCode || "",
-              subelementoLabel:
-                row.subelementoLabel
-                || fallback?.subelementoLabel
-                || (selectedSubelementos.length === 1
-                  ? dimensionLookup.subelementos.get(selectedSubelementos[0])?.label
-                  : "")
-                || "Subelemento não informado",
-              liquidationDate: row.liquidationDate || fallback?.liquidationDate || "",
-              empenhoNumber: row.empenhoNumber || fallback?.empenhoNumber || "",
-            };
-          })
-        : []
-    ),
+    () => {
+      if (activeTab !== "preLiquidationPayments") return [];
+
+      return filteredDetailedRecords
+        .map((row) => {
+          const fallback =
+            preLiquidationDetailLookup.get(String(row.nutitulo || "").trim())
+            || preLiquidationDetailLookup.get(String(row.contractNumber || "").trim());
+          return {
+            ...row,
+            subelementoCode: row.subelementoCode || fallback?.subelementoCode || "",
+            subelementoLabel:
+              row.subelementoLabel
+              || fallback?.subelementoLabel
+              || (selectedSubelementos.length === 1
+                ? dimensionLookup.subelementos.get(selectedSubelementos[0])?.label
+                : "")
+              || "Subelemento não informado",
+            liquidationDate: row.liquidationDate || fallback?.liquidationDate || "",
+            empenhoNumber: row.empenhoNumber || fallback?.empenhoNumber || "",
+          };
+        })
+        .filter(isPaymentBeforeLiquidation)
+        .sort((a, b) => (Number(b?.vlpago || b?.value) || 0) - (Number(a?.vlpago || a?.value) || 0));
+    },
     [activeTab, dimensionLookup.subelementos, filteredDetailedRecords, preLiquidationDetailLookup, selectedSubelementos]
   );
 
@@ -5986,7 +6112,12 @@ export default function CusteioDashboard() {
             variant="section"
           >
             <section className="bi-grid bi-grid-single">
-              <CreditorConcentrationTable rows={creditorConcentrationRows} />
+              <CreditorConcentrationTable
+                rows={creditorConcentrationRows}
+                concentrationMode={concentrationMode}
+                onSelectConcentrationMode={setConcentrationMode}
+                selectedMetric={selectedMetric}
+              />
             </section>
           </ExportableBlock>
         )}
@@ -6098,6 +6229,4 @@ export default function CusteioDashboard() {
     </div>
   );
 }
-
-
 

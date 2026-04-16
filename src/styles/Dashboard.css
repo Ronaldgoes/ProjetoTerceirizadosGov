@@ -2869,13 +2869,39 @@
 
 .bi-alert-row-concentration {
   grid-template-columns:
-    minmax(280px, 2.1fr)
-    minmax(110px, 0.7fr)
+    minmax(260px, 2fr)
+    minmax(70px, 0.55fr)
+    minmax(80px, 0.55fr)
+    minmax(110px, 0.75fr)
     minmax(130px, 0.85fr)
-    minmax(130px, 0.9fr)
-    minmax(130px, 0.9fr)
-    minmax(130px, 0.9fr);
+    minmax(280px, 1.9fr);
   align-items: start;
+}
+
+.bi-alert-row-concentration .bi-cell-stack {
+  min-width: 0;
+}
+
+.bi-alert-row-concentration .bi-cell-stack small {
+  line-height: 1.45;
+  word-break: break-word;
+}
+
+.bi-concentration-mode {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 22px;
+}
+
+.bi-concentration-mode-label {
+  color: #94A3B8;
+  font-size: 0.84rem;
+}
+
+.bi-concentration-mode .bi-toggle-group button {
+  min-width: 118px;
 }
 
 .bi-alert-row-preliquidation {

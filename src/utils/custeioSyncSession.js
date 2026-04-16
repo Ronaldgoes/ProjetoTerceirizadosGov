@@ -1,4 +1,5 @@
 const CUSTEIO_SYNC_SESSION_KEY = "custeio-sync-delta-v1";
+let activeSyncRequest = null;
 
 function padMonth(value) {
   return String(value).padStart(2, "0");
@@ -55,6 +56,56 @@ export function loadCusteioSyncPatch() {
 export function clearCusteioSyncPatch() {
   if (typeof window === "undefined") return;
   window.sessionStorage.removeItem(CUSTEIO_SYNC_SESSION_KEY);
+}
+
+export async function requestCusteioSync(timeoutMs = 12000) {
+  if (typeof window === "undefined") {
+    return { ok: false, cachePatch: null, skipped: true };
+  }
+
+  if (activeSyncRequest) {
+    return activeSyncRequest;
+  }
+
+  activeSyncRequest = (async () => {
+    const controller = new AbortController();
+    const timeoutId = window.setTimeout(() => controller.abort(), timeoutMs);
+
+    try {
+      const response = await fetch("/api/sync-custeio", {
+        method: "POST",
+        signal: controller.signal,
+      });
+
+      if (!response.ok) {
+        return { ok: false, cachePatch: null, status: response.status };
+      }
+
+      const result = await response.json();
+      const cachePatch = result?.cachePatch ?? null;
+
+      if (cachePatch) {
+        saveCusteioSyncPatch(cachePatch);
+      }
+
+      return {
+        ok: Boolean(result?.ok),
+        cachePatch,
+        inProgress: Boolean(result?.inProgress),
+      };
+    } catch (error) {
+      return {
+        ok: false,
+        cachePatch: null,
+        aborted: error?.name === "AbortError",
+      };
+    } finally {
+      window.clearTimeout(timeoutId);
+      activeSyncRequest = null;
+    }
+  })();
+
+  return activeSyncRequest;
 }
 
 export function mergeCusteioDataset(baseDataset, patch) {

@@ -16,9 +16,9 @@ function syncCusteioPlugin() {
     }
 
     if (isRunning) {
-      res.statusCode = 409;
+      res.statusCode = 200;
       res.setHeader("Content-Type", "application/json");
-      res.end(JSON.stringify({ ok: false, error: "Ja existe uma atualizacao em andamento." }));
+      res.end(JSON.stringify({ ok: true, inProgress: true, cachePatch: null }));
       return;
     }
 
