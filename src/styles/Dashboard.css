@@ -2869,12 +2869,11 @@
 
 .bi-alert-row-concentration {
   grid-template-columns:
-    minmax(260px, 2fr)
+    minmax(280px, 1.7fr)
     minmax(70px, 0.55fr)
     minmax(80px, 0.55fr)
-    minmax(110px, 0.75fr)
-    minmax(130px, 0.85fr)
-    minmax(280px, 1.9fr);
+    minmax(130px, 0.7fr)
+    minmax(420px, 2.8fr);
   align-items: start;
 }
 
@@ -2905,14 +2904,28 @@
 .bi-concentration-creditor-name {
   color: #CBD5E1;
   font-weight: 600;
+  line-height: 1.45;
+  word-break: normal;
+  overflow-wrap: anywhere;
 }
 
 .bi-concentration-creditor-value {
   color: #7DD3FC;
   font-size: 0.82rem;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.bi-concentration-creditor-percent {
+  color: #94A3B8;
+  font-size: 0.78rem;
 }
 
 .bi-concentration-creditors {
+  width: 100%;
+  min-width: 0;
   max-height: 150px;
   overflow-y: auto;
   overflow-x: hidden;

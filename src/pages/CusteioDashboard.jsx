@@ -3105,16 +3105,25 @@ const ConcentrationTableRow = memo(function ConcentrationTableRow({
         </div>
         <span>{row.allCredores?.length || row.credoresCount || displayedCredores.length || 0}</span>
         <span>{topNLabel}</span>
-        <span>{fmtPercent(concentrationPercent)}</span>
         <span>{fmtCurrency(totalValue)}</span>
         <span className="bi-cell-stack bi-concentration-creditors">
           {displayedCredores.length > 0 ? (
             <>
               {displayedCredores.map((creditor) => (
-                <small key={`${row.key}-credor-${creditor.label}`} className="bi-concentration-creditor-entry">
-                  <span className="bi-concentration-creditor-name">{creditor.label}</span>
-                  <span className="bi-concentration-creditor-value">{fmtCurrency(getCreditorMetricValue(creditor, selectedMetric))}</span>
-                </small>
+                (() => {
+                  const creditorValue = getCreditorMetricValue(creditor, selectedMetric);
+                  const creditorPercent = totalValue > 0 ? (creditorValue / totalValue) * 100 : 0;
+
+                  return (
+                    <small key={`${row.key}-credor-${creditor.label}`} className="bi-concentration-creditor-entry">
+                      <span className="bi-concentration-creditor-name">{creditor.label}</span>
+                      <span className="bi-concentration-creditor-value">
+                        {fmtCurrency(creditorValue)}
+                        <span className="bi-concentration-creditor-percent">{fmtPercent(creditorPercent)}</span>
+                      </span>
+                    </small>
+                  );
+                })()
               ))}
             </>
           ) : (
@@ -3219,7 +3228,6 @@ const CreditorConcentrationTable = memo(function CreditorConcentrationTable({
           <span>UG / Subelemento</span>
           <span>Credores</span>
           <span>Top N</span>
-          <span>% Concentração</span>
           <span>Total</span>
           <span>Principais Credores</span>
         </div>
